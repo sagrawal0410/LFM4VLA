@@ -61,11 +61,10 @@ class RoboVLMBackbone(nn.Module):
         self.kwargs = kwargs
         self.configs = configs
         self.model_name = configs["model"]
-        self.model_config = json.load(
-            open(
-                os.path.join(self.configs["vlm"]["pretrained_model_name_or_path"], "config.json"),
-                "r",
-            ))
+        from transformers import AutoConfig
+
+        model_id = self.configs["vlm"].get("model_id", "LiquidAI/LFM2.5-VL-1.6B")
+        self.model_config = AutoConfig.from_pretrained(model_id).to_dict()
         
         self.train_setup_configs = train_setup_configs
         self.act_encoder_configs = act_encoder_configs  # None
@@ -74,11 +73,12 @@ class RoboVLMBackbone(nn.Module):
         self.vision_resampler_configs = vision_resampler_configs  # not None, but use_vision_resampler is False, so not used
 
         self.tokenizer, self.backbone = self._init_backbone()
-        if self.train_setup_configs.get("gradient_checkpointing", True):
+        if self.train_setup_configs.get("gradient_checkpointing", False):
             self.backbone.gradient_checkpointing_enable()
+            self.backbone.enable_input_require_grads()
         
         if self.train_setup_configs.get("reinit", False):  # False
-            initialize_param(self.backbone)
+            initialize_params(self.backbone)
         self.act_head, self.fwd_head, self.clip_norm_head = self._init_heads()
 
         if self.act_head_configs is not None:
@@ -108,6 +108,8 @@ class RoboVLMBackbone(nn.Module):
                 self.hand_image_tokens.requires_grad_(True)
         else:
             self.pred_image = False
+
+        self._trainable_parameters()
 
     def model_encode_images(self, images):
         raise NotImplementedError()
@@ -139,13 +141,13 @@ class RoboVLMBackbone(nn.Module):
         return image_features
 
     def _init_backbone(self):
-        processor, model = build_vlm(self.configs["vlm"], self.configs["tokenizer"])
+        model, processor = build_vlm(self.configs["vlm"], self.configs["tokenizer"])
         if "Processor" in self.configs["tokenizer"]["type"]:
             self.processor = processor
             self.tokenizer = processor.tokenizer
         else:
             self.tokenizer = processor
-        
+
         return self.tokenizer, model
 
     @property
@@ -283,7 +285,7 @@ class RoboVLMBackbone(nn.Module):
     def _init_heads(self):
         action_head = None
         if self.act_head_configs is not None:
-            import vlm4vla.model.policy_head as action_heads
+            import models.base_policy as action_heads
 
             _kwargs = copy.deepcopy(self.act_head_configs)
             _kwargs.update(
@@ -354,14 +356,15 @@ class RoboVLMBackbone(nn.Module):
                 elif hasattr(self.vision_tower, "blocks") and len(self.vision_tower.layers) > 0:
                     for block in self.vision_tower.blocks[:self.train_setup_configs.get("train_decoder_layers", -1)]:
                         block.requires_grad_(True)
-        if self.train_setup_configs.get("train_vision_layers", False):
+        if self.train_setup_configs.get("train_vision", False) or self.train_setup_configs.get("train_vision_layers", False):
             self.vision_tower.requires_grad_(True)
         else:
             self.vision_tower.requires_grad_(False)
         
         
         model.enable_input_require_grads()
-        model.gradient_checkpointing = True
+        if self.train_setup_configs.get("gradient_checkpointing", False):
+            model.gradient_checkpointing_enable()
         model.training = True
 
         if self.train_setup_configs.get("train_text_embedding", False):
@@ -389,18 +392,12 @@ class RoboVLMBackbone(nn.Module):
             action_loss = self.act_head.loss(action, action_labels, action_mask)
 
         return action, action_loss
-    
-        def _format_loss(self, loss):
-    # for visualization and loss backward in pytorch lightning
-    _loss = 0
-    _keys = list(loss.keys())
 
-    for k in _keys:
-        if "loss" in k:
-            _loss += loss[k]
-
-    loss["loss"] = _loss
-    return loss
+    @staticmethod
+    def _format_loss(loss):
+        total = sum(v for k, v in loss.items() if "loss" in k and v is not None)
+        loss["loss"] = total
+        return loss
 
     @staticmethod
     def _update_loss(loss, new_loss, suffix=None):
@@ -546,16 +543,30 @@ class RoboVLMBackbone(nn.Module):
             clip_loss = self.clip_norm_head(action_hs, raw_text)
             self._update_loss(loss, clip_loss, "clip")
 
-        action_logits, action_loss = self._forward_action_head(action_2hs, action_labels, action_mask)
+        action_logits, action_loss = self.forward_action_head(action_hs, action_labels, action_mask)
 
-        if model == "train":
-            self._update_loss(loss, action_loss, "action")
+        if mode == "train":
+            self._update_loss(loss, action_loss, "act")
             loss = self._format_loss(loss)
+            return loss
 
-        else:
-            return action_logits
+        return action_logits
 
-        return loss
+    def forward(
+        self,
+        vision_x,
+        lang_x,
+        attention_mask=None,
+        mode="train",
+        **kwargs,
+    ):
+        return self.forward_action(
+            vision_x=vision_x,
+            lang_x=lang_x,
+            attention_mask=attention_mask,
+            mode=mode,
+            **kwargs,
+        )
 
     def forward_action(
         self,
@@ -579,6 +590,7 @@ class RoboVLMBackbone(nn.Module):
         instr_and_action_mask=None,  # not used
         raw_text=None,
         rel_state=None,
+        mode="train",
         **kwargs,
     ):
 
@@ -590,6 +602,8 @@ class RoboVLMBackbone(nn.Module):
             action_mask=action_mask,
             vision_gripper=vision_gripper,
             raw_text=raw_text,
+            mode=mode,
+            **kwargs,
         )
 
     def inference(

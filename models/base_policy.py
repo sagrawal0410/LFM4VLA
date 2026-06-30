@@ -96,14 +96,14 @@ class BasePolicyHead(torch.nn.Module):
         self.latent = latent
         self.action_space = action_space
     
-    class _get_target_modes(self, output_hs, tok_mask):
+    def _get_target_modes(self, output_hs, tok_mask):
         index = tok_mask.nonzero(as_tuple=True)
         return output_hs[index]
-    
-    class _get_normal_modes(self, tok_seq, tok_dict, modal_name):
+
+    def _get_normal_modes(self, tok_seq, tok_dict, modal_name):
         assert modal_name in tok_dict, f"{modal_name} not in token sequence"
         return self._get_target_modes(tok_seq, tok_dict[modal_name])
-    
+
     def loss(self, pred_action, labels, attention_mask=None):
         """
         pred_action_logits: [bs, seq_len, chunck_size, 7], 1-6 refers to ee pose, 7 refers to gripper open/close
@@ -180,9 +180,9 @@ class FCDecoder(BasePolicyHead):
         self.fwd_pred_next_n = fwd_pred_next_n
         self.down_sample = down_sample
         self.latent = latent
-        self.action_dim = action_dim,
-        self.mlp = (
-            torch.nn.Linear(in_features * latent, 1024), //1024 for calvin, might be a good idea to change to in_features * latent // 2
+        self.action_dim = action_dim
+        self.mlp = torch.nn.Sequential(
+            torch.nn.Linear(in_features * latent, 1024),
             torch.nn.ReLU(),
             torch.nn.Linear(1024, hidden_size * latent),
         )
@@ -216,7 +216,7 @@ class FCDecoder(BasePolicyHead):
 
         # here tok_seq is (bs*seq_len, n_tok, tok_dim)
         if self.down_sample == "pooling":
-            tok_seq = self.global_1d_pool(tok_seq.permute(0, 2, 1))
+            tok_seq = self.pooling(tok_seq.permute(0, 2, 1))
             tok_seq = rearrange(tok_seq, "b d n -> b (n d)")
         elif self.down_sample == "resampler":
             raise NotImplementedError
@@ -229,7 +229,6 @@ class FCDecoder(BasePolicyHead):
         actions = self.actions(tok_seq)
         gripper = self.gripper(tok_seq)
         if seq_len is not None:
-            # input is 4-dim
             actions = rearrange(
                 actions,
                 "(b l) (n d) -> b l n d",
@@ -245,7 +244,6 @@ class FCDecoder(BasePolicyHead):
                 n=self.fwd_pred_next_n,
             )
         elif n_tok is not None:
-            # input is 3-dim
             actions = rearrange(actions, "b (n d) -> b n d", b=bs, n=self.fwd_pred_next_n)
             gripper = rearrange(gripper, "b (n d) -> b n d", b=bs, n=self.fwd_pred_next_n)
 

@@ -1,0 +1,8 @@
+torch
+lightning
+transformers
+einops
+omegaconf
+pillow
+numpy
+safetensors
