@@ -334,7 +334,7 @@ class RoboLFM25VL(RoboVLMBackbone):
         action_logits, action_loss = self.forward_action_head(
             action_hs, action_labels, action_mask)
 
-        if mode == "train":
+        if mode in ("train", "val") and action_labels is not None:
             self._update_loss(loss, action_loss, "act")
             loss = self._format_loss(loss)
             return loss

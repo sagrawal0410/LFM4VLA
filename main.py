@@ -1,7 +1,4 @@
 import argparse
-import os
-
-import torch.distributed as dist
 
 from models.model_backbone import load_config
 from train.experiment import experiment
@@ -10,7 +7,7 @@ from train.experiment import experiment
 def parse_args():
     parser = argparse.ArgumentParser(description="LFM4VLA training")
     parser.add_argument("--config", type=str, required=True, help="Path to JSON config")
-    parser.add_argument("--resume", type=str, default=None, help="Checkpoint path to resume from")
+    parser.add_argument("--resume", type=str, default=None, help="Lightning checkpoint to resume from")
     return vars(parser.parse_args())
 
 
@@ -24,8 +21,4 @@ if __name__ == "__main__":
     args = parse_args()
     configs = load_config(args["config"])
     configs = update_configs(configs, args)
-
-    if "RANK" in os.environ:
-        dist.init_process_group(backend="nccl")
-
     experiment(variant=configs)

@@ -145,7 +145,7 @@ class BasePolicyHead(torch.nn.Module):
         return {
             "loss_arm": pose_loss,
             "loss_gripper": gripper_loss,
-            "acc_gripper": acc_gripper_act.item(),
+            "acc_gripper": acc_gripper_act if attention_mask is None else acc_gripper_act[attention_mask].mean(),
         }
 
     def get_labels(self, pred_actions, labels, action_masks, **kwargs):

@@ -6,3 +6,4 @@ omegaconf
 pillow
 numpy
 safetensors
+wandb

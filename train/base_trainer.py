@@ -97,7 +97,11 @@ class BaseTrainer(pl.LightningModule):
         optimizer = torch.optim.AdamW(self.get_grouped_params(self.model), lr=eff_lr)
 
         num_training_batches = self.trainer.estimated_stepping_batches
-        iter_per_epoch = num_training_batches / self.trainer.max_epochs
+        max_epochs = self.configs["trainer"]["max_epochs"]
+        if not num_training_batches or num_training_batches <= 0:
+            num_training_batches = max_epochs * 1000
+
+        iter_per_epoch = max(num_training_batches / max_epochs, 1.0)
         warmup_epochs = self.configs.get("warmup_epochs", 0)
         warmup_steps = self.configs.get("warmup_steps", 0)
         max_iters = self.configs["trainer"].get("max_steps", -1)
@@ -196,14 +200,20 @@ class BaseTrainer(pl.LightningModule):
             log_name = f"{phase}_{key}"
             if dataset is not None:
                 log_name = f"{dataset}_{log_name}"
-            self.log(log_name, value, prog_bar=(key in prog_bar_set), **kwargs)
+            log_value = self._scalar_for_log(value)
+            self.log(log_name, log_value, prog_bar=(key in prog_bar_set), **kwargs)
 
     def _to_device(self, value):
         if isinstance(value, torch.Tensor):
-            return value.cuda()
+            return value.to(self.device)
         if isinstance(value, dict):
             return {k: self._to_device(v) for k, v in value.items()}
         return value
+
+    def _scalar_for_log(self, value):
+        if isinstance(value, torch.Tensor):
+            return value.detach().float().mean()
+        return float(value)
 
     def _build_language_inputs(self, batch, rgb):
         seq_len = self.configs["window_size"]
@@ -242,8 +252,8 @@ class BaseTrainer(pl.LightningModule):
             return inputs, inputs["attention_mask"], seq_len
 
         if isinstance(batch["text"], torch.Tensor):
-            language = batch["text"].cuda()
-            text_mask = batch["text_mask"].cuda()
+            language = batch["text"].to(self.device)
+            text_mask = batch["text_mask"].to(self.device)
             return language, text_mask, seq_len
 
         if isinstance(batch["text"], dict) and "attention_mask" in batch["text"]:
@@ -258,9 +268,9 @@ class BaseTrainer(pl.LightningModule):
 
         rgb = batch["rgb"]
         if isinstance(rgb, list):
-            rgb = [x.cuda() for x in rgb]
+            rgb = [x.to(self.device) for x in rgb]
         else:
-            rgb = rgb.cuda()
+            rgb = rgb.to(self.device)
             if rgb.ndim == 4:
                 rgb = rgb.unsqueeze(1)
             assert rgb.ndim == 5
@@ -269,15 +279,15 @@ class BaseTrainer(pl.LightningModule):
 
         action = batch.get("action")
         if action is not None:
-            action = action.cuda()
+            action = action.to(self.device)
 
         attention_mask = batch.get("attention_mask")
         if attention_mask is not None:
-            attention_mask = attention_mask.cuda()
+            attention_mask = attention_mask.to(self.device)
 
         hand_rgb = batch.get("hand_rgb")
         if self.use_hand_rgb and hand_rgb is not None:
-            hand_rgb = hand_rgb.cuda()
+            hand_rgb = hand_rgb.to(self.device)
         else:
             hand_rgb = None
 
@@ -285,7 +295,7 @@ class BaseTrainer(pl.LightningModule):
         gripper_action_chunck = None
         action_chunck = batch.get("action_chunck")
         if action_chunck is not None:
-            action_chunck = action_chunck.cuda()
+            action_chunck = action_chunck.to(self.device)
             if action_chunck.shape[-1] == 7:
                 arm_action_chunck = action_chunck[..., :6]
                 gripper_action_chunck = action_chunck[..., -1]
@@ -302,7 +312,7 @@ class BaseTrainer(pl.LightningModule):
 
         chunck_mask = batch.get("chunck_mask")
         if chunck_mask is not None:
-            chunck_mask = chunck_mask.cuda()
+            chunck_mask = chunck_mask.to(self.device)
 
         return {
             "rgb": rgb,
@@ -333,14 +343,29 @@ class BaseTrainer(pl.LightningModule):
             mode=mode,
         )
 
+    def _collect_metrics(self, prediction, output):
+        """Merge raw prediction keys into the logging dict (VLM4VLA-style)."""
+        for key, value in prediction.items():
+            if key not in output and value is not None:
+                output[key] = value
+        return output
+
     def training_step(self, batch, batch_idx):
         del batch_idx
         if isinstance(batch, tuple):
             batch = batch[0]
         prediction = self._forward_batch(batch, mode="train")
         output = self._get_loss(prediction)
+        output = self._collect_metrics(prediction, output)
         prog_bar_set = {"loss", "loss_arm_act", "loss_gripper_act", "acc_gripper_act"}
-        self._log_output(output, phase="train", prog_bar_set=prog_bar_set, on_step=True, on_epoch=False)
+        self._log_output(
+            output,
+            phase="train",
+            prog_bar_set=prog_bar_set,
+            on_step=True,
+            on_epoch=True,
+            sync_dist=True,
+        )
         return output["loss"]
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
@@ -348,8 +373,9 @@ class BaseTrainer(pl.LightningModule):
         if isinstance(batch, tuple):
             batch = batch[0]
         with torch.no_grad():
-            prediction = self._forward_batch(batch, mode="train")
+            prediction = self._forward_batch(batch, mode="val")
             output = self._get_loss(prediction)
+            output = self._collect_metrics(prediction, output)
 
         dataset = None
         if self.val_set_names is not None:
@@ -365,6 +391,7 @@ class BaseTrainer(pl.LightningModule):
             on_step=False,
             dataset=dataset,
         )
+        return output["loss"]
 
     def inference_step(self, batch):
         with torch.no_grad():

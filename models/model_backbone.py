@@ -73,10 +73,6 @@ class RoboVLMBackbone(nn.Module):
         self.vision_resampler_configs = vision_resampler_configs  # not None, but use_vision_resampler is False, so not used
 
         self.tokenizer, self.backbone = self._init_backbone()
-        if self.train_setup_configs.get("gradient_checkpointing", False):
-            self.backbone.gradient_checkpointing_enable()
-            self.backbone.enable_input_require_grads()
-        
         if self.train_setup_configs.get("reinit", False):  # False
             initialize_params(self.backbone)
         self.act_head, self.fwd_head, self.clip_norm_head = self._init_heads()
@@ -358,12 +354,17 @@ class RoboVLMBackbone(nn.Module):
                         block.requires_grad_(True)
         if self.train_setup_configs.get("train_vision", False) or self.train_setup_configs.get("train_vision_layers", False):
             self.vision_tower.requires_grad_(True)
+            projector = getattr(self, "multi_modal_projector", None)
+            if projector is not None:
+                projector.requires_grad_(True)
         else:
             self.vision_tower.requires_grad_(False)
-        
-        
-        model.enable_input_require_grads()
+            projector = getattr(self, "multi_modal_projector", None)
+            if projector is not None:
+                projector.requires_grad_(False)
+
         if self.train_setup_configs.get("gradient_checkpointing", False):
+            model.enable_input_require_grads()
             model.gradient_checkpointing_enable()
         model.training = True
 
