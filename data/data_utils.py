@@ -75,8 +75,8 @@ def preprocess_image(sample: List[Image.Image], image_processor, model_type: str
 def get_text_function(tokenizer, tokenizer_type, max_length=256):
     if tokenizer_type in ("lfm2.5", "lfm2.5vl", "qwen25vl", "qwen3vl", "qwen3vlmoe"):
 
-        def preprocess_text_vlm(sample, tokenizer):
-            del tokenizer, max_length
+        def preprocess_text_vlm(sample, tokenizer=None):
+            # LFM/Qwen-VL: tokenize in trainer via build_processor_inputs; pass raw strings.
             return sample, None
 
         return functools.partial(preprocess_text_vlm, tokenizer=tokenizer)
