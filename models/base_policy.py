@@ -175,7 +175,7 @@ class FCDecoder(BasePolicyHead):
         **kwargs,
     ):
 
-        super(FCDecoder, self).__init__(hidden_size, action_dim, down_sample, latent, **kwargs)
+        super().__init__(hidden_size, action_dim, **kwargs)
         self.in_features = in_features
         self.fwd_pred_next_n = fwd_pred_next_n
         self.down_sample = down_sample
@@ -262,7 +262,7 @@ class FCDecoderDualArm(BasePolicyHead):
         **kwargs,
     ):
 
-        super(FCDecoder, self).__init__(hidden_size, action_dim, down_sample, latent, **kwargs)
+        super().__init__(hidden_size, action_dim, **kwargs)
         self.in_features = in_features
         self.fwd_pred_next_n = fwd_pred_next_n
         self.down_sample = down_sample
