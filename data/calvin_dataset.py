@@ -212,10 +212,10 @@ class BaseCalvinDataset(Dataset):
         self.text_aug = text_aug
 
         self.rgb_pad = rgb_pad
-        if self.rgb_pad != -1:
+        if self.rgb_pad > 0:
             self.rgb_shift = RandomShiftsAug(rgb_pad)
         self.gripper_pad = gripper_pad
-        if self.gripper_pad != -1:
+        if self.gripper_pad > 0:
             self.gripper_shift = RandomShiftsAug(gripper_pad)
 
         assert ("validation" in self.abs_datasets_dir.as_posix() or "training" in self.abs_datasets_dir.as_posix())
@@ -296,7 +296,7 @@ class BaseCalvinDataset(Dataset):
             new_list.append(Image.fromarray(np_rgb[i, :, :, :].astype(np.uint8)))
         assert self.image_fn is not None
         image_tensors = self.image_fn(new_list)  # 11264,1176
-        if self.rgb_pad != -1:
+        if self.rgb_pad > 0:
             if self.traj_cons:
                 image_tensors = self.rgb_shift.forward_traj(image_tensors.unsqueeze(0)).squeeze(0)
             else:
@@ -309,7 +309,7 @@ class BaseCalvinDataset(Dataset):
             new_list.append(Image.fromarray(np_gripper[i, :, :, :].astype(np.uint8)))
 
         gripper_tensors = self.image_fn(new_list)
-        if self.gripper_pad != -1:
+        if self.gripper_pad > 0:
             if self.traj_cons:
                 gripper_tensors = self.gripper_shift.forward_traj(gripper_tensors.unsqueeze(0)).squeeze(0)
             else:
