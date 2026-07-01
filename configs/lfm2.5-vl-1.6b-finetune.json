@@ -90,7 +90,7 @@
     },
     "train_dataset": {
         "type": "DiskCalvinDataset",
-        "data_dir": "/path/to/calvin/task_ABC_D/training",
+        "data_dir": "/lambdafs/datasets/lfm4vla_calvin/calvin/dataset/task_ABC_D/training",
         "shift_first": false,
         "model_name": "lfm2.5vl",
         "rgb_pad": 10,
@@ -98,7 +98,7 @@
     },
     "val_dataset": {
         "type": "DiskCalvinDataset",
-        "data_dir": "/path/to/calvin/task_ABC_D/validation",
+        "data_dir": "/lambdafs/datasets/lfm4vla_calvin/calvin/dataset/task_ABC_D/validation",
         "model_name": "lfm2.5vl",
         "rgb_pad": 0,
         "gripper_pad": 0
