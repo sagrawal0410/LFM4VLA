@@ -22,6 +22,25 @@ def _build_strategy(strategy_name):
     return strategy_name
 
 
+def _build_model_checkpoint(ckpt_dir: str, trainer_cfg: dict) -> ModelCheckpoint:
+    every_n = trainer_cfg.get("checkpoint_every_n_train_steps")
+    monitor = trainer_cfg.get("checkpoint_monitor", "val_loss")
+
+    kwargs = dict(
+        dirpath=ckpt_dir,
+        filename="{epoch:02d}-{step}",
+        save_last=trainer_cfg.get("checkpoint_save_last", True),
+        save_top_k=trainer_cfg.get("checkpoint_save_top_k", 1),
+    )
+    if every_n is not None:
+        kwargs["every_n_train_steps"] = every_n
+    if monitor:
+        kwargs["monitor"] = monitor
+        kwargs["mode"] = trainer_cfg.get("checkpoint_monitor_mode", "min")
+
+    return ModelCheckpoint(**kwargs)
+
+
 def experiment(variant):
     variant, exp_name, log_dir, ckpt_dir = prepare_experiment(variant)
 
@@ -63,14 +82,7 @@ def experiment(variant):
     callbacks = [
         SetupCallback(log_dir, ckpt_dir, variant, exp_name),
         LearningRateMonitor(logging_interval="step"),
-        ModelCheckpoint(
-            dirpath=ckpt_dir,
-            filename="{epoch:02d}-{step}",
-            save_top_k=1,
-            monitor="val_loss",
-            mode="min",
-            save_last=True,
-        ),
+        _build_model_checkpoint(ckpt_dir, trainer_cfg),
     ]
 
     trainer = pl.Trainer(

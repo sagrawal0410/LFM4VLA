@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import datetime
 import os
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union
 
@@ -33,6 +34,12 @@ def _build_exp_name(variant: Dict[str, Any]) -> str:
     return "-".join(str(p) for p in parts)
 
 
+def _new_run_id() -> str:
+    """Unique, sortable id so identical configs never share ckpt/wandb dirs."""
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"{ts}-{uuid.uuid4().hex[:6]}"
+
+
 def prepare_experiment(variant: Dict[str, Any]) -> Tuple[Dict[str, Any], str, str, str]:
     """Set seed, create log/checkpoint dirs, attach paths to variant."""
     variant = copy.deepcopy(variant)
@@ -40,7 +47,9 @@ def prepare_experiment(variant: Dict[str, Any]) -> Tuple[Dict[str, Any], str, st
     rank = int(os.environ.get("RANK", "0"))
     seed_everything(seed + rank, workers=True)
 
-    exp_name = _build_exp_name(variant)
+    base_name = _build_exp_name(variant)
+    run_id = _new_run_id()
+    exp_name = f"{base_name}-{run_id}"
     date_str = str(datetime.date.today())
     log_dir = Path(variant["log_root"]) / date_str / exp_name
     ckpt_dir = Path(variant["output_root"]) / date_str / exp_name
@@ -53,6 +62,8 @@ def prepare_experiment(variant: Dict[str, Any]) -> Tuple[Dict[str, Any], str, st
     variant["log_dir"] = log_dir.as_posix()
     variant["output_dir"] = ckpt_dir.as_posix()
     variant["cache_root"] = cache_dir.as_posix()
+    variant["exp_base_name"] = base_name
+    variant["run_id"] = run_id
     variant["exp_name"] = exp_name
 
     return variant, exp_name, log_dir.as_posix(), ckpt_dir.as_posix()
@@ -83,6 +94,7 @@ def build_loggers(
                 WandbLogger(
                     project=variant.get("wandb_project", "lfm4vla"),
                     name=exp_name,
+                    id=variant.get("run_id"),
                     save_dir=log_dir,
                     config=variant,
                 )
