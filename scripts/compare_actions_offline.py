@@ -5,7 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+# Allow `python scripts/compare_actions_offline.py` from repo root without pip install -e .
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,6 +23,22 @@ from models.model_backbone import load_config
 from train.base_trainer import BaseTrainer
 
 ACTION_LABELS = ["dx", "dy", "dz", "droll", "dpitch", "dyaw", "gripper"]
+
+
+def _resolve_ckpt_path(ckpt: str) -> Path:
+    path = Path(ckpt).expanduser().resolve()
+    if path.is_dir():
+        for name in ("last.ckpt",):
+            candidate = path / name
+            if candidate.is_file():
+                return candidate
+        ckpts = sorted(path.glob("*.ckpt"))
+        if not ckpts:
+            raise FileNotFoundError(f"No .ckpt file in directory: {path}")
+        return ckpts[-1]
+    if not path.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {path}")
+    return path
 
 
 def _to_numpy(x: torch.Tensor) -> np.ndarray:
@@ -96,7 +118,7 @@ def _plot_sample(
 def main():
     parser = argparse.ArgumentParser(description="Compare expert vs predicted actions offline")
     parser.add_argument("--config", type=str, required=True, help="Path to run config JSON")
-    parser.add_argument("--ckpt", type=str, required=True, help="Lightning checkpoint (.ckpt)")
+    parser.add_argument("--ckpt", type=str, required=True, help="Lightning .ckpt file or checkpoint directory")
     parser.add_argument("--output_dir", type=str, default="runs/action_compare")
     parser.add_argument("--num_samples", type=int, default=8, help="Number of val batches to plot")
     parser.add_argument("--seed", type=int, default=0)
@@ -112,7 +134,9 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     configs = load_config(args.config)
-    trainer = BaseTrainer.from_checkpoint(args.ckpt, configs=configs)
+    ckpt_path = _resolve_ckpt_path(args.ckpt)
+    print(f"Loading checkpoint: {ckpt_path}")
+    trainer = BaseTrainer.from_checkpoint(str(ckpt_path), configs=configs)
     trainer.eval()
     trainer.to(device)
 
