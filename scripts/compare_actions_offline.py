@@ -54,6 +54,9 @@ def _extract_pred_arm_grip(pred_action) -> tuple[np.ndarray, np.ndarray]:
     else:
         arm = pred_action[..., :6]
         grip = pred_action[..., 6:]
+    # Gripper head outputs logits; map to open probability in [0, 1] for plotting.
+    if isinstance(grip, torch.Tensor):
+        grip = torch.sigmoid(grip)
     arm = _to_numpy(arm)
     grip = _to_numpy(grip)
     if grip.ndim > arm.ndim - 1:
