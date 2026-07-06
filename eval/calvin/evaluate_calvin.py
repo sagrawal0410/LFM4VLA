@@ -52,6 +52,20 @@ _FNV1_32_INIT = 0x811C9DC5
 _FNV_32_PRIME = 0x01000193
 
 
+def _ensure_numpy_legacy_aliases() -> None:
+    """CALVIN env code still uses NumPy 1.x aliases removed in NumPy 2.0."""
+    for name, typ in (
+        ("float", float),
+        ("int", int),
+        ("bool", bool),
+        ("complex", complex),
+        ("object", object),
+        ("str", str),
+    ):
+        if not hasattr(np, name):
+            setattr(np, name, typ)
+
+
 def _ensure_pyhash() -> None:
     """CALVIN imports pyhash; the PyPI wheel fails to build on Python 3.10+."""
     if "pyhash" in sys.modules:
@@ -177,6 +191,7 @@ def main():
     from pytorch_lightning import seed_everything
     seed_everything(args.seed, workers=True)
 
+    _ensure_numpy_legacy_aliases()
     _ensure_pyhash()
     import hydra
     from calvin_agent.evaluation.multistep_sequences import get_sequences
