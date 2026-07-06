@@ -48,6 +48,37 @@ from eval.calvin.model_wrapper import LFMCalvinModel
 
 EP_LEN = 360
 
+_FNV1_32_INIT = 0x811C9DC5
+_FNV_32_PRIME = 0x01000193
+
+
+def _ensure_pyhash() -> None:
+    """CALVIN imports pyhash; the PyPI wheel fails to build on Python 3.10+."""
+    if "pyhash" in sys.modules:
+        return
+    try:
+        import pyhash  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    class _Fnv1_32:
+        def __call__(self, *parts, seed=0):
+            h = seed if seed else _FNV1_32_INIT
+            for part in parts:
+                data = part if isinstance(part, (bytes, bytearray)) else str(part).encode()
+                for byte in data:
+                    h = (h * _FNV_32_PRIME) & 0xFFFFFFFF
+                    h ^= byte
+            return h
+
+    class _PyhashShim:
+        @staticmethod
+        def fnv1_32():
+            return _Fnv1_32()
+
+    sys.modules["pyhash"] = _PyhashShim()
+
 
 def _resolve_ckpt(ckpt: str) -> Path:
     path = Path(ckpt).expanduser().resolve()
@@ -146,6 +177,7 @@ def main():
     from pytorch_lightning import seed_everything
     seed_everything(args.seed, workers=True)
 
+    _ensure_pyhash()
     import hydra
     from calvin_agent.evaluation.multistep_sequences import get_sequences
     from calvin_env.envs.play_table_env import get_env
