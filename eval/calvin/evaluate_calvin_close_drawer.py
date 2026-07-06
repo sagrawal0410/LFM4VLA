@@ -108,11 +108,12 @@ def evaluate_episode(
     execute_step,
     save_video,
     episode_len: int,
+    video_fps: int = 10,
 ):
     from calvin_agent.evaluation.utils import get_env_state_for_initial_condition
 
     robot_obs, scene_obs = get_env_state_for_initial_condition(initial_state)
-    env.reset(robot_obs=robot_obs, scene_obs=scene_obs)
+    obs = env.reset(robot_obs=robot_obs, scene_obs=scene_obs)
     return rollout(
         env,
         model,
@@ -125,6 +126,7 @@ def evaluate_episode(
         execute_step,
         save_video,
         episode_len=episode_len,
+        video_fps=video_fps,
     )
 
 
@@ -163,7 +165,8 @@ def main():
     ap.add_argument("--execute_step", type=int, default=10, help="Open-loop steps per predicted chunk")
     ap.add_argument("--device", type=str, default="cuda:0")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--save_video", action="store_true", help="Write a GIF per rollout")
+    ap.add_argument("--save_video", action="store_true", help="Write an MP4 per rollout")
+    ap.add_argument("--video_fps", type=int, default=10, help="FPS for rollout MP4/GIF")
     ap.add_argument("--output_dir", type=str, default="runs/calvin_eval/close_drawer")
     args = ap.parse_args()
 
@@ -211,6 +214,7 @@ def main():
                 args.execute_step,
                 args.save_video,
                 args.episode_len,
+                args.video_fps,
             )
         except Exception:
             print(f"[episode {episode_i}] crashed:\n{traceback.format_exc()}")
