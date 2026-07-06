@@ -22,23 +22,45 @@ def _build_strategy(strategy_name):
     return strategy_name
 
 
-def _build_model_checkpoint(ckpt_dir: str, trainer_cfg: dict) -> ModelCheckpoint:
+def _build_model_checkpoints(ckpt_dir: str, trainer_cfg: dict) -> list[ModelCheckpoint]:
+    """Step-based and (optional) best-val checkpoints as separate callbacks.
+
+    Lightning couples ``every_n_train_steps`` and ``monitor`` awkwardly: a single
+    callback with both forces ``every_n_epochs=0`` (disabling the val-end save) and
+    skips/defers step saves whenever the monitored metric is absent. Splitting them
+    keeps step checkpoints unconditional and best-val checkpoints independent.
+    """
+    callbacks: list[ModelCheckpoint] = []
+
     every_n = trainer_cfg.get("checkpoint_every_n_train_steps")
+    if every_n:
+        callbacks.append(
+            ModelCheckpoint(
+                dirpath=ckpt_dir,
+                filename="step-{epoch:02d}-{step}",
+                every_n_train_steps=every_n,
+                save_top_k=trainer_cfg.get("checkpoint_step_save_top_k", -1),
+                save_last=trainer_cfg.get("checkpoint_save_last", True),
+            )
+        )
+
     monitor = trainer_cfg.get("checkpoint_monitor", "val_loss")
-
-    kwargs = dict(
-        dirpath=ckpt_dir,
-        filename="{epoch:02d}-{step}",
-        save_last=trainer_cfg.get("checkpoint_save_last", True),
-        save_top_k=trainer_cfg.get("checkpoint_save_top_k", 1),
-    )
-    if every_n is not None:
-        kwargs["every_n_train_steps"] = every_n
     if monitor:
-        kwargs["monitor"] = monitor
-        kwargs["mode"] = trainer_cfg.get("checkpoint_monitor_mode", "min")
+        callbacks.append(
+            ModelCheckpoint(
+                dirpath=ckpt_dir,
+                filename="best-{epoch:02d}-{step}",
+                monitor=monitor,
+                mode=trainer_cfg.get("checkpoint_monitor_mode", "min"),
+                save_top_k=trainer_cfg.get("checkpoint_save_top_k", 1),
+                save_last=False,
+            )
+        )
 
-    return ModelCheckpoint(**kwargs)
+    if not callbacks:
+        callbacks.append(ModelCheckpoint(dirpath=ckpt_dir, save_last=True))
+
+    return callbacks
 
 
 def experiment(variant):
@@ -82,7 +104,7 @@ def experiment(variant):
     callbacks = [
         SetupCallback(log_dir, ckpt_dir, variant, exp_name),
         LearningRateMonitor(logging_interval="step"),
-        _build_model_checkpoint(ckpt_dir, trainer_cfg),
+        *_build_model_checkpoints(ckpt_dir, trainer_cfg),
     ]
 
     trainer = pl.Trainer(
