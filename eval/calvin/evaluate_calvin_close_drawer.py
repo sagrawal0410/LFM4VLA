@@ -46,6 +46,8 @@ from eval.calvin.evaluate_calvin import (
 from models.model_backbone import load_config
 from eval.calvin.model_wrapper import LFMCalvinModel
 
+# Only static + gripper cameras (skip tactile — often segfaults with EGL on H100).
+CALVIN_OBS_SPACE = {"rgb_obs": ["rgb_static", "rgb_gripper"], "depth_obs": []}
 TASK_NAME = "close_drawer"
 
 
@@ -192,9 +194,9 @@ def main():
     val_annotations = OmegaConf.load(conf_dir / "annotations/new_playtable_validation.yaml")
 
     val_folder = Path(args.dataset_path) / "validation"
-    env = get_env(val_folder, show_gui=False)
+    env = get_env(val_folder, show_gui=False, obs_space=CALVIN_OBS_SPACE)
 
-    print(f"Loading LFM policy from {ckpt_path}")
+    print(f"Loading LFM policy from {ckpt_path}", flush=True)
     model = LFMCalvinModel(ckpt_path, configs, device=args.device)
 
     initial_states = get_close_drawer_initial_states(args.num_episodes, seed=args.seed)

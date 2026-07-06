@@ -42,7 +42,6 @@ if str(_REPO_ROOT) not in sys.path:
 import numpy as np
 import torch
 from omegaconf import OmegaConf
-from PIL import Image
 
 from eval.calvin.obs_utils import obs_to_uint8_rgb
 from models.model_backbone import load_config
@@ -125,96 +124,39 @@ def _is_valid_frame(frame: np.ndarray) -> bool:
     )
 
 
-def _save_rollout_video(frames, out_path: Path, fps: int = 10) -> Path | None:
-    """Write every captured sim frame to an MP4 (primary) and GIF (fallback)."""
-    if not frames:
-        print("  [warn] no frames captured for video")
-        return None
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    arr = np.stack([np.asarray(f, dtype=np.uint8) for f in frames], axis=0)
-    if arr.ndim != 4 or arr.shape[-1] != 3:
-        raise ValueError(f"expected frames [T,H,W,3], got {arr.shape}")
-
-    mp4_path = out_path.with_suffix(".mp4")
-    for writer_name, writer_fn in (
-        ("imageio", _write_mp4_imageio),
-        ("opencv", _write_mp4_cv2),
-    ):
-        try:
-            writer_fn(arr, mp4_path, fps)
-            print(f"  saved rollout video: {mp4_path} ({len(arr)} frames @ {fps} fps via {writer_name})")
-            return mp4_path
-        except Exception as exc:  # noqa: BLE001
-            print(f"  [warn] {writer_name} mp4 failed ({exc})")
-
-    gif_path = out_path.with_suffix(".gif")
-    pil_frames = [Image.fromarray(f) for f in arr]
-    pil_frames[0].save(
-        gif_path,
-        save_all=True,
-        append_images=pil_frames[1:],
-        duration=max(1, int(1000 / max(fps, 1))),
-        loop=0,
-        disposal=2,
-    )
-    print(f"  saved rollout gif (fallback): {gif_path} ({len(arr)} frames)")
-    return gif_path
-
-
-def _write_mp4_imageio(arr: np.ndarray, path: Path, fps: int) -> None:
-    import imageio.v3 as iio
-
-    iio.imwrite(path, arr, fps=fps, codec="libx264", plugin="ffmpeg")
-
-
-def _write_mp4_cv2(arr: np.ndarray, path: Path, fps: int) -> None:
-    import cv2
-
-    h, w = arr.shape[1:3]
-    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-    if not writer.isOpened():
-        raise RuntimeError("cv2.VideoWriter failed to open")
-    for frame in arr:
-        writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-    writer.release()
-
-
 def rollout(env, model, task_oracle, subtask, val_annotations, out_dir, seq_i, subtask_i,
             execute_step, save_video, episode_len: int = EP_LEN, video_fps: int = 10):
+    from eval.calvin.video_recorder import FrameRecorder
+
     obs = env.get_obs()
     lang = val_annotations[subtask][0]
     model.reset()
     start_info = env.get_info()
 
-    frames = []
     success = False
     stem = _rollout_stem(out_dir, seq_i, subtask_i, subtask)
+    recorder = FrameRecorder(out_dir, stem.name, fps=video_fps) if save_video else None
     try:
         for step_i in range(episode_len):
             action = model.step(obs, lang, execute_step=execute_step)
             obs, _, _, current_info = env.step(action)
-            if save_video:
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
+            if recorder is not None:
                 frame = obs_to_uint8_rgb(obs)
                 if _is_valid_frame(frame):
-                    frames.append(frame)
+                    recorder.add(frame)
+                    if step_i % 30 == 0:
+                        print(f"  recorded frame {recorder.count}", flush=True)
             done = task_oracle.get_task_info_for_set(start_info, current_info, {subtask})
             if len(done) > 0:
                 success = True
                 return True
         return False
     finally:
-        if save_video and frames:
+        if recorder is not None and recorder.count > 0:
             tag = "SUCC" if success else "FAIL"
-            video_path = _save_rollout_video(
-                frames,
-                out_dir / f"{stem.name}-{tag}",
-                fps=video_fps,
-            )
+            video_path = recorder.finalize(tag)
             if video_path is not None:
-                print(f"  >>> watch rollout: {video_path}")
+                print(f"  >>> watch rollout: {video_path}", flush=True)
 
 
 def evaluate_sequence(env, model, task_oracle, initial_state, eval_sequence, val_annotations,

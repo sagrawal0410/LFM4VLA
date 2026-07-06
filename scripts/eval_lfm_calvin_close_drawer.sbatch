@@ -11,6 +11,9 @@
 set -euo pipefail
 LFM4VLA_ROOT="${LFM4VLA_ROOT:-$HOME/LFM4VLA}"
 CONDA_ENV="${CONDA_ENV:-lfm4vla}"
+# cuda:0 = fast but can segfault when EGL sim + CUDA inference share the GPU.
+# Set POLICY_DEVICE=cpu if you get "Aborted (core dumped)".
+POLICY_DEVICE="${POLICY_DEVICE:-cuda:0}"
 CALVIN_ROOT="${CALVIN_ROOT:-$HOME/calvin}"
 DATASET_PATH="${DATASET_PATH:-/lambdafs/datasets/lfm4vla_calvin/calvin/dataset/task_ABC_D}"
 
@@ -43,6 +46,8 @@ srun python eval/calvin/evaluate_calvin_close_drawer.py \
   --video_fps "$VIDEO_FPS" \
   --save_video \
   --output_dir "$OUTPUT_DIR" \
-  --device cuda:0
+  --device "$POLICY_DEVICE"
 
-echo "Results + GIFs: $LFM4VLA_ROOT/$OUTPUT_DIR"
+echo "Results + videos: $LFM4VLA_ROOT/$OUTPUT_DIR"
+echo "If job crashed, assemble from PNGs:"
+echo "  python scripts/assemble_rollout_video.py $OUTPUT_DIR/seq000-0-close_drawer_frames"
