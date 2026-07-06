@@ -54,7 +54,6 @@ class MLPSigmoidHead(torch.nn.Module):
             torch.nn.Linear(512, 256),
             torch.nn.ReLU(),
             torch.nn.Linear(256, output_size),
-            torch.nn.Sigmoid(),
         )
 
     def forward(self, x):

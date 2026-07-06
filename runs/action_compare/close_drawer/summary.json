@@ -6,7 +6,7 @@
     "droll": 0.2445184737443924,
     "dpitch": 0.23363730311393738,
     "dyaw": 0.21248456835746765,
-    "gripper": 0.49313998222351074,
+    "gripper": 0.006860016845166683,
     "instruction": "go towards the drawer and store the object",
     "sample_idx": 0
   },
@@ -17,7 +17,7 @@
     "droll": 0.4369499683380127,
     "dpitch": 0.09360598027706146,
     "dyaw": 0.2694421410560608,
-    "gripper": 0.4855746328830719,
+    "gripper": 0.014425364322960377,
     "instruction": "rotate right the pink block",
     "sample_idx": 1
   },
@@ -28,7 +28,7 @@
     "droll": 0.05166972428560257,
     "dpitch": 0.0644112378358841,
     "dyaw": 0.09575925767421722,
-    "gripper": 0.4108126759529114,
+    "gripper": 0.08918732404708862,
     "instruction": "move the door all the way to the left",
     "sample_idx": 2
   },
@@ -39,7 +39,7 @@
     "droll": 0.15724065899848938,
     "dpitch": 0.22534184157848358,
     "dyaw": 0.48001837730407715,
-    "gripper": 0.229964017868042,
+    "gripper": 0.49991780519485474,
     "instruction": "grasp the blue block, then turn it right",
     "sample_idx": 3
   },
@@ -61,7 +61,7 @@
     "droll": 0.1654798835515976,
     "dpitch": 0.059779487550258636,
     "dyaw": 0.27840057015419006,
-    "gripper": 0.49949097633361816,
+    "gripper": 0.0005090492777526379,
     "instruction": "put the object in the cabinet",
     "sample_idx": 5
   },
@@ -83,7 +83,7 @@
     "droll": 0.16349557042121887,
     "dpitch": 0.2560843527317047,
     "dyaw": 0.3042075037956238,
-    "gripper": 0.4850215017795563,
+    "gripper": 0.014978473074734211,
     "instruction": "toggle the light switch to turn off the yellow light",
     "sample_idx": 7
   },
@@ -94,7 +94,7 @@
     "droll": 0.0890006273984909,
     "dpitch": 0.1415894627571106,
     "dyaw": 0.027405422180891037,
-    "gripper": 0.4871782660484314,
+    "gripper": 0.012821746990084648,
     "instruction": "turn on the led light",
     "sample_idx": 8
   },
@@ -116,7 +116,7 @@
     "droll": 0.09070096164941788,
     "dpitch": 0.11253698915243149,
     "dyaw": 0.046312954276800156,
-    "gripper": 0.487427294254303,
+    "gripper": 0.012572718784213066,
     "instruction": "turn on the led",
     "sample_idx": 10
   },
@@ -127,7 +127,7 @@
     "droll": 0.07872238010168076,
     "dpitch": 0.1187354177236557,
     "dyaw": 0.1572597771883011,
-    "gripper": 0.4976131319999695,
+    "gripper": 0.002386871725320816,
     "instruction": "grasp the handle of the drawer and close it",
     "sample_idx": 11
   },
@@ -138,7 +138,7 @@
     "droll": 0.25032660365104675,
     "dpitch": 0.08071570098400116,
     "dyaw": 0.14849406480789185,
-    "gripper": 0.428609699010849,
+    "gripper": 0.0713903084397316,
     "instruction": "turn off the led light",
     "sample_idx": 12
   },
@@ -160,7 +160,7 @@
     "droll": 0.05060463026165962,
     "dpitch": 0.07960884273052216,
     "dyaw": 0.1255200207233429,
-    "gripper": 0.08175347745418549,
+    "gripper": 0.1817534863948822,
     "instruction": "in the slider grasp the red block",
     "sample_idx": 14
   },
