@@ -23,6 +23,7 @@ from models.model_backbone import load_config
 from train.base_trainer import BaseTrainer
 
 ACTION_LABELS = ["dx", "dy", "dz", "droll", "dpitch", "dyaw", "gripper"]
+# Gripper is 0 = closed, 1 = open (binarized in calvin_dataset collater).
 
 
 def _resolve_ckpt_path(ckpt: str) -> Path:

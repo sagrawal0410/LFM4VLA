@@ -396,15 +396,9 @@ class RoboVLMBackbone(nn.Module):
 
     @staticmethod
     def _format_loss(loss):
-        total_loss = 0
-        for k, v in loss.items():
-            if "loss" in k and v is not None:
-                if "gripper" in k:
-                    total_loss += v.item() * 5
-                else:
-                    total_loss += v.item()
+        total = sum(v for k, v in loss.items() if "loss" in k and v is not None)
 
-        loss["loss"] = total_loss
+        loss["loss"] = total
         return loss
 
     @staticmethod

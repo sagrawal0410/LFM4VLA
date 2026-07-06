@@ -298,12 +298,10 @@ class BaseTrainer(pl.LightningModule):
             action_chunck = action_chunck.to(self.device)
             if action_chunck.shape[-1] == 7:
                 arm_action_chunck = action_chunck[..., :6]
+                # Collater binarizes gripper to {0, 1} (closed/open); do not remap again.
                 gripper_action_chunck = action_chunck[..., -1]
             else:
                 arm_action_chunck = action_chunck
-
-        if gripper_action_chunck is not None:
-                gripper_action_chunck = (gripper_action_chunck + 1.0) / 2
 
         if isinstance(rgb, torch.Tensor):
             rgb = rgb[:, :seq_len]
