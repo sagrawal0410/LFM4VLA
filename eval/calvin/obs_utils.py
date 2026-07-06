@@ -14,13 +14,7 @@ except ImportError:  # pragma: no cover
 
 def obs_to_uint8_rgb(obs, env=None) -> np.ndarray:
     """Convert a CALVIN ``rgb_static`` observation to uint8 HWC RGB for saving/display."""
-    if env is not None:
-        try:
-            frame = env.render(mode="rgb_array")
-            return _to_uint8_rgb(frame)
-        except Exception:
-            pass
-
+    # Use obs from env.step() — cameras are already rendered in get_obs().
     rgb = obs["rgb_obs"]["rgb_static"]
     return _to_uint8_rgb(rgb)
 

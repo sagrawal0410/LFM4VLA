@@ -111,6 +111,15 @@ def _resolve_ckpt(ckpt: str) -> Path:
     return path
 
 
+def _rollout_stem(out_dir: Path, seq_i: int, subtask_i: int, subtask: str) -> Path:
+    return out_dir / f"seq{seq_i:03d}-{subtask_i}-{subtask}"
+
+
+def _save_frame_png(frame: np.ndarray, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(frame).save(path)
+
+
 def _save_video(frames, out_path: Path, fps: int = 10):
     """Write rollout frames to disk. Uses PIL; falls back to PNG sequence."""
     if not frames:
@@ -118,12 +127,25 @@ def _save_video(frames, out_path: Path, fps: int = 10):
         return
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    # Subsample long rollouts so GIFs stay viewable and don't blow up memory.
     stride = max(1, len(frames) // 120)
     sampled = frames[::stride]
     arr = np.stack(sampled, axis=0).astype(np.uint8)
     if arr.ndim != 4 or arr.shape[-1] != 3:
         raise ValueError(f"expected frames [T,H,W,3], got {arr.shape}")
+
+    # Always write stills first so a GIF failure/crash still leaves something to inspect.
+    stem = out_path.with_suffix("")
+    _save_frame_png(arr[0], stem.with_suffix(".preview.png"))
+    _save_frame_png(arr[0], stem.with_suffix(".first.png"))
+    _save_frame_png(arr[-1], stem.with_suffix(".last.png"))
+    print(f"  saved previews: {stem.name}.{{preview,first,last}}.png")
+
+    if len(arr) > 1:
+        diffs = [np.mean(np.abs(arr[i].astype(np.int16) - arr[0].astype(np.int16)))
+                 for i in range(1, min(len(arr), 20))]
+        max_diff = max(diffs)
+        print(f"  frame motion check: max mean pixel diff vs frame0 = {max_diff:.2f} "
+              f"(0 ≈ frozen scene)")
 
     try:
         pil_frames = [Image.fromarray(f) for f in arr]
@@ -133,18 +155,17 @@ def _save_video(frames, out_path: Path, fps: int = 10):
             append_images=pil_frames[1:],
             duration=max(1, int(1000 / max(fps, 1))),
             loop=0,
+            disposal=2,
         )
         print(f"  saved video: {out_path} ({len(sampled)} frames, stride={stride})")
-        return
     except Exception as exc:  # noqa: BLE001
         print(f"  [warn] PIL gif write failed ({exc}); saving PNG frames")
-
-    frame_dir = out_path.with_suffix("")
-    frame_dir.mkdir(parents=True, exist_ok=True)
-    for i, frame in enumerate(arr):
-        Image.fromarray(frame).save(frame_dir / f"frame_{i:04d}.png")
-    np.save(frame_dir / "frames.npy", arr)
-    print(f"  saved {len(arr)} frames to {frame_dir}/")
+        frame_dir = out_path.with_suffix("")
+        frame_dir.mkdir(parents=True, exist_ok=True)
+        for i, frame in enumerate(arr):
+            Image.fromarray(frame).save(frame_dir / f"frame_{i:04d}.png")
+        np.save(frame_dir / "frames.npy", arr)
+        print(f"  saved {len(arr)} frames to {frame_dir}/")
 
 
 def rollout(env, model, task_oracle, subtask, val_annotations, out_dir, seq_i, subtask_i,
@@ -156,19 +177,23 @@ def rollout(env, model, task_oracle, subtask, val_annotations, out_dir, seq_i, s
 
     frames = []
     success = False
+    stem = _rollout_stem(out_dir, seq_i, subtask_i, subtask)
     try:
         if save_video:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             frames.append(obs_to_uint8_rgb(obs, env))
+            _save_frame_png(frames[0], stem.with_name(f"{stem.name}-start.png"))
 
-        for _ in range(episode_len):
+        for step_i in range(episode_len):
             action = model.step(obs, lang, execute_step=execute_step)
             obs, _, _, current_info = env.step(action)
             if save_video:
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 frames.append(obs_to_uint8_rgb(obs, env))
+                if step_i % 30 == 29:
+                    _save_frame_png(frames[-1], stem.with_name(f"{stem.name}-latest.png"))
             done = task_oracle.get_task_info_for_set(start_info, current_info, {subtask})
             if len(done) > 0:
                 success = True
@@ -177,10 +202,8 @@ def rollout(env, model, task_oracle, subtask, val_annotations, out_dir, seq_i, s
     finally:
         if save_video and frames:
             tag = "SUCC" if success else "FAIL"
-            out_path = out_dir / f"seq{seq_i:03d}-{subtask_i}-{subtask}-{tag}.gif"
+            out_path = out_dir / f"{stem.name}-{tag}.gif"
             _save_video(frames, out_path)
-            # Always save first frame as PNG for quick inspection.
-            Image.fromarray(frames[0]).save(out_path.with_suffix(".preview.png"))
 
 
 def evaluate_sequence(env, model, task_oracle, initial_state, eval_sequence, val_annotations,
