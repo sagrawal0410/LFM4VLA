@@ -18,10 +18,12 @@ Example:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sys
 import time
+import traceback
 from itertools import product
 from pathlib import Path
 
@@ -105,6 +107,7 @@ def evaluate_episode(
     episode_i,
     execute_step,
     save_video,
+    episode_len: int,
 ):
     from calvin_agent.evaluation.utils import get_env_state_for_initial_condition
 
@@ -121,7 +124,29 @@ def evaluate_episode(
         0,
         execute_step,
         save_video,
+        episode_len=episode_len,
     )
+
+
+def _write_summary(out_dir, results, initial_states, ckpt_path, config_path, execute_step, t0):
+    success_rate = float(np.mean(results)) if results else 0.0
+    summary = {
+        "task": TASK_NAME,
+        "num_episodes": len(results),
+        "successes": int(sum(results)),
+        "success_rate": success_rate,
+        "execute_step": execute_step,
+        "ckpt": ckpt_path.as_posix(),
+        "config": str(config_path),
+        "elapsed_sec": round(time.time() - t0, 1),
+        "episodes": [
+            {"episode": i, "success": bool(results[i]), "initial_state": initial_states[i]}
+            for i in range(len(results))
+        ],
+    }
+    with open(out_dir / "results.json", "w") as f:
+        json.dump(summary, f, indent=2)
+    return summary
 
 
 def main():
@@ -133,6 +158,8 @@ def main():
     ap.add_argument("--calvin_root", required=True, help="Path to the calvin repo (for conf/)")
     ap.add_argument("--dataset_path", required=True, help="Path to task_ABC_D (contains validation/)")
     ap.add_argument("--num_episodes", type=int, default=20, help="Number of close_drawer rollouts")
+    ap.add_argument("--episode_len", type=int, default=180,
+                    help="Max env steps per rollout (CALVIN default is 360)")
     ap.add_argument("--execute_step", type=int, default=10, help="Open-loop steps per predicted chunk")
     ap.add_argument("--device", type=str, default="cuda:0")
     ap.add_argument("--seed", type=int, default=0)
@@ -151,6 +178,7 @@ def main():
 
     configs = load_config(args.config)
     ckpt_path = _resolve_ckpt(args.ckpt)
+    config_path = Path(args.config).expanduser().resolve()
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -171,17 +199,23 @@ def main():
     results = []
     t0 = time.time()
     for episode_i, initial_state in enumerate(initial_states):
-        ok = evaluate_episode(
-            env,
-            model,
-            task_oracle,
-            initial_state,
-            val_annotations,
-            out_dir,
-            episode_i,
-            args.execute_step,
-            args.save_video,
-        )
+        try:
+            ok = evaluate_episode(
+                env,
+                model,
+                task_oracle,
+                initial_state,
+                val_annotations,
+                out_dir,
+                episode_i,
+                args.execute_step,
+                args.save_video,
+                args.episode_len,
+            )
+        except Exception:
+            print(f"[episode {episode_i}] crashed:\n{traceback.format_exc()}")
+            ok = False
+
         results.append(int(ok))
         sr = sum(results) / len(results) if results else 0.0
         print(
@@ -189,24 +223,13 @@ def main():
             f"drawer={initial_state['drawer']} slider={initial_state['slider']} "
             f"{'SUCCESS' if ok else 'FAIL'} | running SR={sr * 100:.1f}%"
         )
+        _write_summary(out_dir, results, initial_states[: len(results)], ckpt_path, config_path,
+                       args.execute_step, t0)
+        gc.collect()
 
-    success_rate = float(np.mean(results)) if results else 0.0
-    summary = {
-        "task": TASK_NAME,
-        "num_episodes": len(results),
-        "successes": int(sum(results)),
-        "success_rate": success_rate,
-        "execute_step": args.execute_step,
-        "ckpt": ckpt_path.as_posix(),
-        "config": str(Path(args.config).expanduser().resolve()),
-        "elapsed_sec": round(time.time() - t0, 1),
-        "episodes": [
-            {"episode": i, "success": bool(results[i]), "initial_state": initial_states[i]}
-            for i in range(len(results))
-        ],
-    }
-    with open(out_dir / "results.json", "w") as f:
-        json.dump(summary, f, indent=2)
+    summary = _write_summary(out_dir, results, initial_states, ckpt_path, config_path,
+                             args.execute_step, t0)
+    success_rate = summary["success_rate"]
 
     print("\n=== close_drawer results ===")
     print(f"  Success rate: {success_rate * 100:.1f}% ({sum(results)}/{len(results)})")

@@ -9,7 +9,6 @@
 #SBATCH --account=liquidai
 
 set -euo pipefail
-
 LFM4VLA_ROOT="${LFM4VLA_ROOT:-$HOME/LFM4VLA}"
 CONDA_ENV="${CONDA_ENV:-lfm4vla}"
 CALVIN_ROOT="${CALVIN_ROOT:-$HOME/calvin}"
@@ -20,6 +19,7 @@ CONFIG="${CONFIG:-$LFM4VLA_ROOT/runs/logs/2026-07-06/lfm450m_finetune-lfm450m-bs
 CKPT="${CKPT:-$LFM4VLA_ROOT/runs/checkpoints/2026-07-06/lfm450m_finetune-lfm450m-bs16x1-lr2e-05-ws1-FCDecoder-lat1-20260706-182828-fa18dc/last.ckpt}"
 OUTPUT_DIR="${OUTPUT_DIR:-runs/calvin_eval/close_drawer_lfm450m}"
 NUM_EPISODES="${NUM_EPISODES:-20}"
+EPISODE_LEN="${EPISODE_LEN:-180}"
 EXECUTE_STEP="${EXECUTE_STEP:-10}"
 
 cd "$LFM4VLA_ROOT"
@@ -37,6 +37,7 @@ srun python eval/calvin/evaluate_calvin_close_drawer.py \
   --calvin_root "$CALVIN_ROOT" \
   --dataset_path "$DATASET_PATH" \
   --num_episodes "$NUM_EPISODES" \
+  --episode_len "$EPISODE_LEN" \
   --execute_step "$EXECUTE_STEP" \
   --save_video \
   --output_dir "$OUTPUT_DIR" \

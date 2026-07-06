@@ -42,7 +42,9 @@ if str(_REPO_ROOT) not in sys.path:
 import numpy as np
 import torch
 from omegaconf import OmegaConf
+from PIL import Image
 
+from eval.calvin.obs_utils import obs_to_uint8_rgb
 from models.model_backbone import load_config
 from eval.calvin.model_wrapper import LFMCalvinModel
 
@@ -109,42 +111,76 @@ def _resolve_ckpt(ckpt: str) -> Path:
     return path
 
 
-def _save_video(frames, out_path: Path, fps: int = 30):
+def _save_video(frames, out_path: Path, fps: int = 10):
+    """Write rollout frames to disk. Uses PIL; falls back to PNG sequence."""
+    if not frames:
+        print(f"  [warn] no frames to save for {out_path.name}")
+        return
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Subsample long rollouts so GIFs stay viewable and don't blow up memory.
+    stride = max(1, len(frames) // 120)
+    sampled = frames[::stride]
+    arr = np.stack(sampled, axis=0).astype(np.uint8)
+    if arr.ndim != 4 or arr.shape[-1] != 3:
+        raise ValueError(f"expected frames [T,H,W,3], got {arr.shape}")
+
     try:
-        try:
-            from moviepy.editor import ImageSequenceClip  # moviepy < 2
-        except ImportError:
-            from moviepy import ImageSequenceClip  # moviepy >= 2
-        clip = ImageSequenceClip(list(frames), fps=fps)
-        clip.write_gif(out_path.as_posix(), fps=fps, logger=None)
+        pil_frames = [Image.fromarray(f) for f in arr]
+        pil_frames[0].save(
+            out_path,
+            save_all=True,
+            append_images=pil_frames[1:],
+            duration=max(1, int(1000 / max(fps, 1))),
+            loop=0,
+        )
+        print(f"  saved video: {out_path} ({len(sampled)} frames, stride={stride})")
+        return
     except Exception as exc:  # noqa: BLE001
-        # Fallback: dump frames as a .npy so the run isn't lost.
-        np.save(out_path.with_suffix(".npy"), np.asarray(frames))
-        print(f"  [warn] video write failed ({exc}); saved raw frames to {out_path.with_suffix('.npy')}")
+        print(f"  [warn] PIL gif write failed ({exc}); saving PNG frames")
+
+    frame_dir = out_path.with_suffix("")
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    for i, frame in enumerate(arr):
+        Image.fromarray(frame).save(frame_dir / f"frame_{i:04d}.png")
+    np.save(frame_dir / "frames.npy", arr)
+    print(f"  saved {len(arr)} frames to {frame_dir}/")
 
 
 def rollout(env, model, task_oracle, subtask, val_annotations, out_dir, seq_i, subtask_i,
-            execute_step, save_video):
+            execute_step, save_video, episode_len: int = EP_LEN):
     obs = env.get_obs()
     lang = val_annotations[subtask][0]
     model.reset()
     start_info = env.get_info()
 
     frames = []
-    for _ in range(EP_LEN):
-        action = model.step(obs, lang, execute_step=execute_step)
-        obs, _, _, current_info = env.step(action)
+    success = False
+    try:
         if save_video:
-            frames.append(np.asarray(obs["rgb_obs"]["rgb_static"]).copy())
-        done = task_oracle.get_task_info_for_set(start_info, current_info, {subtask})
-        if len(done) > 0:
-            if save_video:
-                _save_video(frames, out_dir / f"seq{seq_i:03d}-{subtask_i}-{subtask}-SUCC.gif")
-            return True
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            frames.append(obs_to_uint8_rgb(obs, env))
 
-    if save_video:
-        _save_video(frames, out_dir / f"seq{seq_i:03d}-{subtask_i}-{subtask}-FAIL.gif")
-    return False
+        for _ in range(episode_len):
+            action = model.step(obs, lang, execute_step=execute_step)
+            obs, _, _, current_info = env.step(action)
+            if save_video:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                frames.append(obs_to_uint8_rgb(obs, env))
+            done = task_oracle.get_task_info_for_set(start_info, current_info, {subtask})
+            if len(done) > 0:
+                success = True
+                return True
+        return False
+    finally:
+        if save_video and frames:
+            tag = "SUCC" if success else "FAIL"
+            out_path = out_dir / f"seq{seq_i:03d}-{subtask_i}-{subtask}-{tag}.gif"
+            _save_video(frames, out_path)
+            # Always save first frame as PNG for quick inspection.
+            Image.fromarray(frames[0]).save(out_path.with_suffix(".preview.png"))
 
 
 def evaluate_sequence(env, model, task_oracle, initial_state, eval_sequence, val_annotations,

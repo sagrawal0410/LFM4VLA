@@ -20,6 +20,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from eval.calvin.obs_utils import obs_to_uint8_rgb
 from train.base_trainer import BaseTrainer
 
 
@@ -75,7 +76,7 @@ class LFMCalvinModel:
     # Inference + post-processing
     # ------------------------------------------------------------------
     def _predict_chunk(self, obs, goal) -> torch.Tensor:
-        image = Image.fromarray(obs["rgb_obs"]["rgb_static"])
+        image = Image.fromarray(obs_to_uint8_rgb(obs))
         rgb = self.trainer.model.image_processor(image)  # [C, H, W] float in [0, 255]
         rgb = rgb.unsqueeze(0).unsqueeze(0)  # [B=1, T=1, C, H, W]
 
