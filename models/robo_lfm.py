@@ -339,6 +339,9 @@ class RoboLFM25VL(RoboVLMBackbone):
             clip_loss = self.clip_norm_head(action_hs, raw_text)
             self._update_loss(loss, clip_loss, "clip")
 
+        if mode not in ("train", "val") and self.act_head is not None:
+            action_hs = action_hs.to(dtype=next(self.act_head.parameters()).dtype)
+
         action_logits, action_loss = self.forward_action_head(
             action_hs, action_labels, action_mask)
 
