@@ -276,8 +276,11 @@ class RoboLFM25VL(RoboVLMBackbone):
 
         action_token_mask = None
         if action_space == "continuous":
+            action_token = self.action_token
+            if mode not in ("train", "val"):
+                action_token = action_token.to(dtype=next(self.model.parameters()).dtype)
             action_tokens = repeat(
-                self.action_token,
+                action_token,
                 "d -> b n d",
                 b=multimodal_embeds.shape[0],
                 n=self.latent_num,
@@ -302,6 +305,11 @@ class RoboLFM25VL(RoboVLMBackbone):
             if multimodal_attention_mask is not None:
                 multimodal_attention_mask = rearrange(
                     multimodal_attention_mask, "(b l) n -> b (l n)", l=seq_len)
+
+        if mode not in ("train", "val"):
+            model_dtype = next(self.model.parameters()).dtype
+            if multimodal_embeds.dtype != model_dtype:
+                multimodal_embeds = multimodal_embeds.to(dtype=model_dtype)
 
         output = self.model(
             input_ids=None,
