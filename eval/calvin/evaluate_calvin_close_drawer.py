@@ -164,7 +164,8 @@ def main():
     ap.add_argument("--num_episodes", type=int, default=20, help="Number of close_drawer rollouts")
     ap.add_argument("--episode_len", type=int, default=180,
                     help="Max env steps per rollout (CALVIN default is 360)")
-    ap.add_argument("--execute_step", type=int, default=10, help="Open-loop steps per predicted chunk")
+    ap.add_argument("--execute_step", type=int, default=1,
+                    help="Env steps replayed per model query (1 = closed-loop, query every cycle)")
     ap.add_argument("--device", type=str, default="cuda:0")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save_video", action="store_true", help="Write an MP4 per rollout")

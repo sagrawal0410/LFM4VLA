@@ -46,31 +46,60 @@ class LFMCalvinModel:
         self.norm_min = float(configs.get("norm_min", -1.0))
         self.norm_max = float(configs.get("norm_max", 1.0))
 
-        # Buffer of remaining actions in the current predicted chunk.
+        # Remaining actions in the current predicted chunk (only used if execute_step > 1).
         self._chunk_buffer: list[torch.Tensor] = []
+        self._steps_since_replan = 0
+        # Diagnostics: raw normalized actions the policy emitted this episode.
+        self.emitted_actions: list[np.ndarray] = []
 
     # ------------------------------------------------------------------
     # CalvinBaseModel interface
     # ------------------------------------------------------------------
     def reset(self):
         self._chunk_buffer = []
+        self._steps_since_replan = 0
+        self.emitted_actions = []
 
-    def step(self, obs, goal, execute_step: int = 10):
-        """Return a single 7-D CALVIN action for the current observation.
+    def step(self, obs, goal, execute_step: int = 1):
+        """Return one 7-D CALVIN action for the *current* observation.
 
-        ``execute_step`` controls open-loop chunk execution: predict a fresh chunk,
-        then play back that many steps before re-querying the model. ``execute_step=1``
-        re-plans every env step (slow, most reactive); ``execute_step=fwd_pred_next_n``
-        plays the whole chunk (fast).
+        Closed-loop control: with ``execute_step == 1`` (default) the model is queried
+        on every env step using the latest camera frame, so each control cycle gets a
+        fresh, image-conditioned action. ``execute_step > 1`` replays that many actions
+        from a predicted chunk before re-querying (open-loop chunking, less reactive).
         """
         assert 1 <= execute_step <= self.fwd_pred_next_n
 
-        if not self._chunk_buffer:
-            chunk = self._predict_chunk(obs, goal)  # [fwd_pred_next_n, 7], normalized arm + prob gripper
-            self._chunk_buffer = list(chunk[:execute_step])
+        if execute_step == 1:
+            # Always re-query the policy with the newest observation.
+            chunk = self._predict_chunk(obs, goal)
+            action = chunk[0]
+        else:
+            if not self._chunk_buffer or self._steps_since_replan >= execute_step:
+                chunk = self._predict_chunk(obs, goal)
+                self._chunk_buffer = list(chunk[:execute_step])
+                self._steps_since_replan = 0
+            action = self._chunk_buffer.pop(0)
+            self._steps_since_replan += 1
 
-        action = self._chunk_buffer.pop(0)
+        self.emitted_actions.append(action.detach().cpu().numpy().copy())
         return self._to_calvin_action(action)
+
+    def action_stats(self) -> dict:
+        """Per-dimension std of the raw normalized actions emitted this episode.
+
+        If std ~ 0 the policy is emitting a constant action (frozen / not reacting to
+        the image); healthy closed-loop control should show non-trivial variation.
+        """
+        if not self.emitted_actions:
+            return {}
+        arr = np.stack(self.emitted_actions, axis=0)  # [T, 7]
+        return {
+            "num_steps": int(arr.shape[0]),
+            "arm_std_per_dim": [round(float(s), 4) for s in arr[:, :6].std(axis=0)],
+            "arm_mean_per_dim": [round(float(m), 4) for m in arr[:, :6].mean(axis=0)],
+            "gripper_mean": round(float(arr[:, 6].mean()), 4),
+        }
 
     # ------------------------------------------------------------------
     # Inference + post-processing

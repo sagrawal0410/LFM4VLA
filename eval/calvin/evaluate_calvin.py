@@ -152,6 +152,13 @@ def rollout(env, model, task_oracle, subtask, val_annotations, out_dir, seq_i, s
                 return True
         return False
     finally:
+        # Diagnostic: confirm the policy emitted varying, image-conditioned actions.
+        stats = getattr(model, "action_stats", lambda: {})()
+        if stats:
+            print(f"  action stats: {stats}", flush=True)
+            if max(stats.get("arm_std_per_dim", [0])) < 1e-3:
+                print("  [WARN] arm action std ~0 — policy is emitting a near-constant "
+                      "action (frozen / not reacting to image).", flush=True)
         if recorder is not None and recorder.count > 0:
             tag = "SUCC" if success else "FAIL"
             video_path = recorder.finalize(tag)
@@ -193,7 +200,8 @@ def main():
     ap.add_argument("--calvin_root", required=True, help="Path to the calvin repo (for conf/)")
     ap.add_argument("--dataset_path", required=True, help="Path to task_ABC_D (contains validation/)")
     ap.add_argument("--num_sequences", type=int, default=20, help="Eval chains (full benchmark = 1000)")
-    ap.add_argument("--execute_step", type=int, default=10, help="Open-loop steps per predicted chunk")
+    ap.add_argument("--execute_step", type=int, default=1,
+                    help="Env steps replayed per model query (1 = closed-loop, query every cycle)")
     ap.add_argument("--device", type=str, default="cuda:0")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save_video", action="store_true", help="Write a GIF per subtask rollout")
