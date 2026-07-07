@@ -25,13 +25,27 @@ class FrameRecorder:
         Image.fromarray(np.asarray(frame, dtype=np.uint8)).save(path)
         self.count += 1
 
-    def finalize(self, tag: str) -> Path | None:
+    def _assemble(self, tag: str) -> Path | None:
         if self.count == 0:
             print(f"  [warn] no frames in {self.frame_dir}")
             return None
-
         frames = [
             np.array(Image.open(path).convert("RGB"))
             for path in sorted(self.frame_dir.glob("frame_*.png"))
         ]
-        return save_rollout_video(frames, self.video_stem.parent / f"{self.video_stem.name}-{tag}", self.fps)
+        return save_rollout_video(
+            frames, self.video_stem.parent / f"{self.video_stem.name}-{tag}", self.fps
+        )
+
+    def snapshot(self) -> Path | None:
+        """Write a partial MP4 from frames so far, so a mid-rollout crash still leaves a video."""
+        return self._assemble("PARTIAL")
+
+    def finalize(self, tag: str) -> Path | None:
+        video = self._assemble(tag)
+        # Drop the stale PARTIAL once the final video exists.
+        if video is not None:
+            partial = self.video_stem.parent / f"{self.video_stem.name}-PARTIAL.mp4"
+            if partial.exists():
+                partial.unlink()
+        return video

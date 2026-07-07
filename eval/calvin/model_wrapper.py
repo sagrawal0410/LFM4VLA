@@ -114,9 +114,6 @@ class LFMCalvinModel:
         with torch.no_grad():
             pred = self.trainer.inference_step(batch)["action"]
 
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
-
         if isinstance(pred, (tuple, list)):
             arm, grip = pred
             grip = torch.sigmoid(grip)  # head emits logits; map to open probability

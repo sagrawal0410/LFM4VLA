@@ -41,6 +41,7 @@ from eval.calvin.evaluate_calvin import (
     _ensure_numpy_legacy_aliases,
     _ensure_pyhash,
     _resolve_ckpt,
+    pin_egl_device,
     rollout,
 )
 from models.model_backbone import load_config
@@ -193,6 +194,10 @@ def main():
     task_cfg = OmegaConf.load(conf_dir / "callbacks/rollout/tasks/new_playtable_tasks.yaml")
     task_oracle = hydra.utils.instantiate(task_cfg)
     val_annotations = OmegaConf.load(conf_dir / "annotations/new_playtable_validation.yaml")
+
+    # Pin EGL to the CUDA GPU BEFORE the PyBullet env loads its EGL plugin,
+    # otherwise EGL rendering + CUDA inference collide and segfault.
+    pin_egl_device(args.device)
 
     val_folder = Path(args.dataset_path) / "validation"
     env = get_env(val_folder, show_gui=False, obs_space=CALVIN_OBS_SPACE)

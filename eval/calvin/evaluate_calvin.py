@@ -67,6 +67,32 @@ def _ensure_numpy_legacy_aliases() -> None:
             setattr(np, name, typ)
 
 
+def pin_egl_device(device: str) -> None:
+    """Pin PyBullet's EGL renderer to the same GPU as CUDA inference.
+
+    Without this, on multi-GPU nodes PyBullet's EGL plugin renders on an arbitrary
+    physical device ("EGL device choice: -1 of N") while PyTorch runs CUDA on the
+    SLURM-allocated GPU. That mismatch causes intermittent `Aborted (core dumped)`
+    segfaults. Must be called BEFORE the PyBullet env is created.
+    """
+    if not str(device).startswith("cuda"):
+        return
+    if "EGL_VISIBLE_DEVICES" in os.environ:
+        return
+    try:
+        import torch
+        from calvin_env.utils.utils import set_egl_device
+
+        set_egl_device(torch.device(device))
+        print(f"[egl] pinned EGL_VISIBLE_DEVICES={os.environ.get('EGL_VISIBLE_DEVICES')} "
+              f"for {device}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        cuda_idx = device.split(":")[1] if ":" in device else "0"
+        os.environ["EGL_VISIBLE_DEVICES"] = cuda_idx
+        print(f"[egl] set_egl_device unavailable ({exc}); "
+              f"fell back to EGL_VISIBLE_DEVICES={cuda_idx}", flush=True)
+
+
 def _ensure_pyhash() -> None:
     """CALVIN imports pyhash; the PyPI wheel fails to build on Python 3.10+."""
     if "pyhash" in sys.modules:
@@ -146,6 +172,8 @@ def rollout(env, model, task_oracle, subtask, val_annotations, out_dir, seq_i, s
                     recorder.add(frame)
                     if step_i % 30 == 0:
                         print(f"  recorded frame {recorder.count}", flush=True)
+                        # Flush a partial MP4 so a crash mid-rollout still leaves a video.
+                        recorder.snapshot()
             done = task_oracle.get_task_info_for_set(start_info, current_info, {subtask})
             if len(done) > 0:
                 success = True
@@ -230,6 +258,7 @@ def main():
     val_annotations = OmegaConf.load(conf_dir / "annotations/new_playtable_validation.yaml")
 
     # Environment (PyBullet).
+    pin_egl_device(args.device)
     val_folder = Path(args.dataset_path) / "validation"
     env = get_env(val_folder, show_gui=False)
 
