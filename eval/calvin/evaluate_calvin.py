@@ -55,6 +55,11 @@ from eval.calvin.model_wrapper import LFMCalvinModel
 
 EP_LEN = 360
 
+# Static + gripper cameras only. Excluding the tactile camera is essential: tacto
+# renders it via pyrender/OpenGL in a background thread every env.step() and
+# segfaults in glReadPixels on headless nodes ("Aborted (core dumped)").
+CALVIN_OBS_SPACE = {"rgb_obs": ["rgb_static", "rgb_gripper"], "depth_obs": []}
+
 _FNV1_32_INIT = 0x811C9DC5
 _FNV_32_PRIME = 0x01000193
 
@@ -277,10 +282,11 @@ def main():
     task_oracle = hydra.utils.instantiate(task_cfg)
     val_annotations = OmegaConf.load(conf_dir / "annotations/new_playtable_validation.yaml")
 
-    # Environment (PyBullet). Render on CPU to avoid EGL/CUDA segfaults.
+    # Environment (PyBullet). Render on CPU to avoid EGL/CUDA segfaults, and drop
+    # the tactile camera whose pyrender thread crashes in glReadPixels.
     force_cpu_rendering()
     val_folder = Path(args.dataset_path) / "validation"
-    env = get_env(val_folder, show_gui=False)
+    env = get_env(val_folder, show_gui=False, obs_space=CALVIN_OBS_SPACE)
 
     print(f"Loading LFM policy from {ckpt_path}")
     model = LFMCalvinModel(ckpt_path, configs, device=args.device)

@@ -38,6 +38,7 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from eval.calvin.evaluate_calvin import (
+    CALVIN_OBS_SPACE,
     _ensure_numpy_legacy_aliases,
     _ensure_pyhash,
     _resolve_ckpt,
@@ -47,8 +48,6 @@ from eval.calvin.evaluate_calvin import (
 from models.model_backbone import load_config
 from eval.calvin.model_wrapper import LFMCalvinModel
 
-# Only static + gripper cameras (skip tactile — often segfaults with EGL on H100).
-CALVIN_OBS_SPACE = {"rgb_obs": ["rgb_static", "rgb_gripper"], "depth_obs": []}
 TASK_NAME = "close_drawer"
 
 
