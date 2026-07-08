@@ -43,7 +43,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from eval.calvin.obs_utils import capture_rgb_static, obs_to_uint8_rgb
+from eval.calvin.obs_utils import capture_rgb_static
 from models.model_backbone import load_config
 from eval.calvin.model_wrapper import LFMCalvinModel
 
@@ -68,32 +68,20 @@ def _ensure_numpy_legacy_aliases() -> None:
 
 
 def pin_egl_device(device: str) -> None:
-    """Pin PyBullet's EGL renderer to the same GPU as CUDA inference.
+    """Pin PyBullet's EGL renderer to the CUDA GPU, before the env is created.
 
-    Without this, on multi-GPU nodes PyBullet's EGL plugin renders on an arbitrary
-    physical device ("EGL device choice: -1 of N") while PyTorch runs CUDA on the
-    SLURM-allocated GPU. That mismatch causes intermittent `Aborted (core dumped)`
-    segfaults. Must be called BEFORE the PyBullet env is created.
+    CALVIN's own ``get_egl_device_id()`` compiles a C helper that needs X11 headers
+    (absent on headless clusters). With one GPU allocated per job the EGL index simply
+    equals the CUDA index, so we set ``EGL_VISIBLE_DEVICES`` directly and skip the compile.
     """
     if not str(device).startswith("cuda"):
         return
 
     import torch
-    from calvin_env.utils.utils import EglDeviceNotFoundError, get_egl_device_id
-
-    if "EGL_VISIBLE_DEVICES" in os.environ:
-        print(f"[egl] EGL_VISIBLE_DEVICES already set to {os.environ['EGL_VISIBLE_DEVICES']}; "
-              "remapping via get_egl_device_id()", flush=True)
 
     cuda_id = torch.device(device).index or 0
-    try:
-        egl_id = get_egl_device_id(cuda_id)
-    except EglDeviceNotFoundError as exc:
-        egl_id = 0
-        print(f"[egl] get_egl_device_id failed ({exc}); falling back to EGL device 0", flush=True)
-
-    os.environ["EGL_VISIBLE_DEVICES"] = str(egl_id)
-    print(f"[egl] pinned EGL_VISIBLE_DEVICES={egl_id} for CUDA device {cuda_id}", flush=True)
+    os.environ["EGL_VISIBLE_DEVICES"] = str(cuda_id)
+    print(f"[egl] pinned EGL_VISIBLE_DEVICES={cuda_id}", flush=True)
 
 
 def _ensure_pyhash() -> None:

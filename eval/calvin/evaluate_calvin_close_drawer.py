@@ -10,7 +10,7 @@ Example:
         --calvin_root ~/calvin \
         --dataset_path /lambdafs/datasets/lfm4vla_calvin/calvin/dataset/task_ABC_D \
         --num_episodes 20 \
-        --execute_step 10 \
+        --execute_step 1 \
         --save_video \
         --output_dir runs/calvin_eval/close_drawer/<exp>
 """
