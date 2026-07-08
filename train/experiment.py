@@ -3,7 +3,7 @@ import os
 import lightning.pytorch as pl
 import torch
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 
 from data.build_dataset import build_dataset
 from train.base_trainer import BaseTrainer
@@ -63,6 +63,33 @@ def _build_model_checkpoints(ckpt_dir: str, trainer_cfg: dict) -> list[ModelChec
     return callbacks
 
 
+def _build_loader(dataset, variant, train: bool) -> DataLoader:
+    """Build a DataLoader, adapting to map-style (CALVIN) vs iterable (LIBERO RLDS).
+
+    Iterable RLDS streams handle their own shuffling (TF shuffle buffer) and cannot
+    use ``shuffle`` or a ``sampler``; they must also stay single-worker to avoid
+    duplicating the TensorFlow stream across worker processes.
+    """
+    if isinstance(dataset, IterableDataset):
+        return DataLoader(
+            dataset,
+            batch_size=variant["batch_size"],
+            num_workers=1,
+            pin_memory=torch.cuda.is_available(),
+            collate_fn=dataset.collater,
+            drop_last=True,
+        )
+    return DataLoader(
+        dataset,
+        batch_size=variant["batch_size"],
+        num_workers=variant.get("num_workers", 4),
+        pin_memory=torch.cuda.is_available(),
+        shuffle=train,
+        collate_fn=dataset.collater,
+        drop_last=train,
+    )
+
+
 def experiment(variant):
     variant, exp_name, log_dir, ckpt_dir = prepare_experiment(variant)
 
@@ -81,24 +108,8 @@ def experiment(variant):
     train_dataset = build_dataset(variant["train_dataset"], variant, trainer_module.model)
     val_dataset = build_dataset(variant["val_dataset"], variant, trainer_module.model)
 
-    loader_kwargs = dict(
-        batch_size=variant["batch_size"],
-        num_workers=variant.get("num_workers", 4),
-        pin_memory=torch.cuda.is_available(),
-    )
-    train_loader = DataLoader(
-        train_dataset,
-        shuffle=True,
-        collate_fn=train_dataset.collater,
-        drop_last=True,
-        **loader_kwargs,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        shuffle=False,
-        collate_fn=val_dataset.collater,
-        **loader_kwargs,
-    )
+    train_loader = _build_loader(train_dataset, variant, train=True)
+    val_loader = _build_loader(val_dataset, variant, train=False)
 
     trainer_cfg = variant["trainer"]
     callbacks = [
@@ -121,7 +132,10 @@ def experiment(variant):
         accumulate_grad_batches=trainer_cfg.get("accumulate_grad_batches", 1),
         check_val_every_n_epoch=trainer_cfg.get("check_val_every_n_epoch", 1),
         val_check_interval=trainer_cfg.get("val_check_interval", 1.0),
-        use_distributed_sampler=trainer_cfg.get("use_distributed_sampler", True),
+        use_distributed_sampler=(
+            trainer_cfg.get("use_distributed_sampler", True)
+            and not isinstance(train_dataset, IterableDataset)
+        ),
         callbacks=callbacks,
     )
 
