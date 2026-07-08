@@ -95,11 +95,14 @@ class LFMCalvinModel:
         if not self.emitted_actions:
             return {}
         arr = np.stack(self.emitted_actions, axis=0)  # [T, 7]
+        gripper_open = arr[:, 6] > 0.5  # binarized command actually sent to the env
         return {
             "num_steps": int(arr.shape[0]),
             "arm_std_per_dim": [round(float(s), 4) for s in arr[:, :6].std(axis=0)],
             "arm_mean_per_dim": [round(float(m), 4) for m in arr[:, :6].mean(axis=0)],
             "gripper_mean": round(float(arr[:, 6].mean()), 4),
+            "gripper_open_frac": round(float(gripper_open.mean()), 3),
+            "gripper_switches": int(np.count_nonzero(np.diff(gripper_open))),
         }
 
     # ------------------------------------------------------------------
