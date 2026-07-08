@@ -50,9 +50,31 @@ def save_rollout_video(frames, out_path: Path, fps: int = 10) -> Path | None:
 
 
 def _write_mp4_imageio(arr: np.ndarray, path: Path, fps: int) -> None:
+    """Write H.264 MP4 via imageio + imageio-ffmpeg.
+
+    imageio v3 no longer registers ``plugin="ffmpeg"`` even when imageio-ffmpeg
+    is installed; the v2 ``mimwrite`` API still picks up the bundled ffmpeg exe.
+    """
+    import imageio
+
+    # v2 API — works with ``pip install imageio-ffmpeg``.
+    try:
+        imageio.mimwrite(path, arr, fps=fps, codec="libx264", quality=8)
+        return
+    except TypeError:
+        # Older imageio builds may not accept ``quality``.
+        imageio.mimwrite(path, arr, fps=fps, codec="libx264")
+        return
+    except Exception:
+        pass
+
+    # v3 pyav backend (optional: ``pip install av``).
     import imageio.v3 as iio
 
-    iio.imwrite(path, arr, fps=fps, codec="libx264", plugin="ffmpeg")
+    with iio.imopen(path, "w", plugin="pyav") as writer:
+        writer.init_video_stream("libx264", fps=fps)
+        for frame in arr:
+            writer.write_frame(frame)
 
 
 def _write_mp4_cv2(arr: np.ndarray, path: Path, fps: int) -> None:
