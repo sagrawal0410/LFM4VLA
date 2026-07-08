@@ -21,7 +21,7 @@ CKPT="${CKPT:?Set CKPT to last.ckpt or checkpoint dir}"
 OUTPUT_DIR="${OUTPUT_DIR:-runs/calvin_eval/$(basename "$CKPT" .ckpt)}"
 NUM_SEQUENCES="${NUM_SEQUENCES:-20}"
 # 1 = truly closed-loop (query policy every env step). >1 = open-loop chunking.
-EXECUTE_STEP="${EXECUTE_STEP:-10}"
+EXECUTE_STEP="${EXECUTE_STEP:-1}"
 
 cd "$LFM4VLA_ROOT"
 source "$(conda info --base)/etc/profile.d/conda.sh"
