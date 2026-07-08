@@ -19,16 +19,21 @@ def save_rollout_video(frames, out_path: Path, fps: int = 10) -> Path | None:
         raise ValueError(f"expected frames [T,H,W,3], got {arr.shape}")
 
     mp4_path = out_path.with_suffix(".mp4")
+    errors = []
     for writer_name, writer_fn in (
-        ("imageio", _write_mp4_imageio),
-        ("opencv", _write_mp4_cv2),
+        ("imageio", _write_mp4_imageio),  # H.264, most portable (needs imageio-ffmpeg)
+        ("opencv", _write_mp4_cv2),       # mp4v fallback, no extra deps
     ):
         try:
             writer_fn(arr, mp4_path, fps)
             print(f"  saved rollout video: {mp4_path} ({len(arr)} frames @ {fps} fps via {writer_name})")
             return mp4_path
         except Exception as exc:  # noqa: BLE001
-            print(f"  [warn] {writer_name} mp4 failed ({exc})")
+            errors.append(f"{writer_name}: {exc}")
+
+    # Both MP4 writers failed — now it's worth complaining loudly.
+    for err in errors:
+        print(f"  [warn] mp4 writer unavailable ({err})")
 
     gif_path = out_path.with_suffix(".gif")
     pil_frames = [Image.fromarray(f) for f in arr]
