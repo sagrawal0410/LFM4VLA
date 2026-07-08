@@ -51,6 +51,7 @@ class LFMCalvinModel:
         self._steps_since_replan = 0
         # Diagnostics: raw normalized actions the policy emitted this episode.
         self.emitted_actions: list[np.ndarray] = []
+        self._inference_calls = 0
 
     # ------------------------------------------------------------------
     # CalvinBaseModel interface
@@ -113,6 +114,20 @@ class LFMCalvinModel:
 
         with torch.no_grad():
             pred = self.trainer.inference_step(batch)["action"]
+
+        # At execute_step=1 this runs every env step (~350+ calls per sequence).
+        # Without periodic cache release, allocator growth eventually aborts the
+        # process (native SIGABRT, no Python traceback). Cheap at this frequency.
+        self._inference_calls += 1
+        if self.device.type == "cuda" and self._inference_calls % 50 == 0:
+            import gc
+
+            gc.collect()
+            torch.cuda.empty_cache()
+            alloc = torch.cuda.memory_allocated(self.device) / 1e9
+            reserv = torch.cuda.memory_reserved(self.device) / 1e9
+            print(f"  [mem] inference #{self._inference_calls}: "
+                  f"cuda alloc={alloc:.2f}GB reserved={reserv:.2f}GB", flush=True)
 
         if isinstance(pred, (tuple, list)):
             arm, grip = pred

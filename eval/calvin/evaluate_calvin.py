@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import faulthandler
 import json
 import os
 import sys
@@ -31,9 +32,15 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
+# Print a traceback for native crashes (SIGSEGV/SIGABRT) instead of a bare
+# "Aborted (core dumped)" with no context.
+faulthandler.enable()
+
 # Headless GPU rendering for PyBullet/pyrender. Set before importing sim libs.
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 os.environ.setdefault("MESA_GL_VERSION_OVERRIDE", "4.1")
+# Reduce CUDA allocator fragmentation across many small inference calls.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -161,6 +168,9 @@ def _record_frame(recorder, obs, step_i: int) -> None:
     recorder.add(frame)
     if step_i % 30 == 0:
         print(f"  recorded frame {recorder.count}", flush=True)
+    # PNGs are already on disk each step; refresh the PARTIAL.mp4 only occasionally
+    # (each snapshot re-encodes the whole video and spawns an ffmpeg subprocess).
+    if step_i > 0 and step_i % 120 == 0:
         recorder.snapshot()
 
 
