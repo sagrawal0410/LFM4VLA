@@ -40,7 +40,6 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import numpy as np
-import torch
 from omegaconf import OmegaConf
 
 from eval.calvin.obs_utils import capture_rgb_static
@@ -67,21 +66,30 @@ def _ensure_numpy_legacy_aliases() -> None:
             setattr(np, name, typ)
 
 
-def pin_egl_device(device: str) -> None:
-    """Pin PyBullet's EGL renderer to the CUDA GPU, before the env is created.
+def force_cpu_rendering() -> None:
+    """Render CALVIN cameras with PyBullet's software TinyRenderer instead of EGL.
 
-    CALVIN's own ``get_egl_device_id()`` compiles a C helper that needs X11 headers
-    (absent on headless clusters). With one GPU allocated per job the EGL index simply
-    equals the CUDA index, so we set ``EGL_VISIBLE_DEVICES`` directly and skip the compile.
+    Hardware (EGL) rendering shares the GPU with policy inference. On some driver/GPU
+    combos (H100 + heavy VLM) that intermittently ``Aborted (core dumped)`` mid-rollout.
+    Forcing the CPU renderer removes the GPU render path entirely, so nothing collides
+    with CUDA. Fast enough for CALVIN's small (200x200 / 84x84) frames.
+
+    Call once BEFORE any rollout (env creation is fine too).
     """
-    if not str(device).startswith("cuda"):
+    import pybullet as p
+
+    if getattr(p, "_lfm_cpu_render_patched", False):
         return
 
-    import torch
+    orig_get_camera_image = p.getCameraImage
 
-    cuda_id = torch.device(device).index or 0
-    os.environ["EGL_VISIBLE_DEVICES"] = str(cuda_id)
-    print(f"[egl] pinned EGL_VISIBLE_DEVICES={cuda_id}", flush=True)
+    def _cpu_get_camera_image(*args, **kwargs):
+        kwargs.setdefault("renderer", p.ER_TINY_RENDERER)
+        return orig_get_camera_image(*args, **kwargs)
+
+    p.getCameraImage = _cpu_get_camera_image
+    p._lfm_cpu_render_patched = True
+    print("[render] forced CPU TinyRenderer for CALVIN cameras (EGL/CUDA-safe)", flush=True)
 
 
 def _ensure_pyhash() -> None:
@@ -134,7 +142,7 @@ def _rollout_stem(out_dir: Path, seq_i: int, subtask_i: int, subtask: str) -> Pa
 def _is_valid_frame(frame: np.ndarray) -> bool:
     if frame.ndim != 3 or frame.shape[2] != 3 or frame.shape[0] < 64 or frame.shape[1] < 64:
         return False
-    # Reject EGL readback garbage: mostly black with a noisy strip (std>2 but mean~0).
+    # Reject blank/garbage renders: a real CALVIN scene is bright and varied.
     mean = float(frame.mean())
     std = float(frame.std())
     return mean > 20.0 and std > 5.0
@@ -166,24 +174,15 @@ def rollout(env, model, task_oracle, subtask, val_annotations, out_dir, seq_i, s
     recorder = FrameRecorder(out_dir, stem.name, fps=video_fps) if save_video else None
     try:
         for step_i in range(episode_len):
-            # Re-render now, before CUDA touches the GPU. env.step() returns an obs
-            # rendered immediately after the previous model.step(), when the EGL
-            # buffer is often corrupted (black + noise strip).
-            obs = env.get_obs()
             if recorder is not None:
                 _record_frame(recorder, obs, step_i)
-
             action = model.step(obs, lang, execute_step=execute_step)
-
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-
             obs, _, _, current_info = env.step(action)
             done = task_oracle.get_task_info_for_set(start_info, current_info, {subtask})
             if len(done) > 0:
                 success = True
                 if recorder is not None:
-                    _record_frame(recorder, env.get_obs(), step_i + 1)
+                    _record_frame(recorder, obs, step_i + 1)
                 return True
         return False
     finally:
@@ -264,8 +263,8 @@ def main():
     task_oracle = hydra.utils.instantiate(task_cfg)
     val_annotations = OmegaConf.load(conf_dir / "annotations/new_playtable_validation.yaml")
 
-    # Environment (PyBullet).
-    pin_egl_device(args.device)
+    # Environment (PyBullet). Render on CPU to avoid EGL/CUDA segfaults.
+    force_cpu_rendering()
     val_folder = Path(args.dataset_path) / "validation"
     env = get_env(val_folder, show_gui=False)
 

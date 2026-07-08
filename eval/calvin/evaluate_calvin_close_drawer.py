@@ -41,7 +41,7 @@ from eval.calvin.evaluate_calvin import (
     _ensure_numpy_legacy_aliases,
     _ensure_pyhash,
     _resolve_ckpt,
-    pin_egl_device,
+    force_cpu_rendering,
     rollout,
 )
 from models.model_backbone import load_config
@@ -195,9 +195,9 @@ def main():
     task_oracle = hydra.utils.instantiate(task_cfg)
     val_annotations = OmegaConf.load(conf_dir / "annotations/new_playtable_validation.yaml")
 
-    # Pin EGL to the CUDA GPU BEFORE the PyBullet env loads its EGL plugin,
-    # otherwise EGL rendering + CUDA inference collide and segfault.
-    pin_egl_device(args.device)
+    # Render CALVIN cameras on the CPU. Hardware EGL rendering shares the GPU with the
+    # policy and intermittently segfaults ("Aborted (core dumped)") mid-rollout.
+    force_cpu_rendering()
 
     val_folder = Path(args.dataset_path) / "validation"
     env = get_env(val_folder, show_gui=False, obs_space=CALVIN_OBS_SPACE)
