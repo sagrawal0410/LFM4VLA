@@ -67,29 +67,33 @@ def _ensure_numpy_legacy_aliases() -> None:
 
 
 def force_cpu_rendering() -> None:
-    """Render CALVIN cameras with PyBullet's software TinyRenderer instead of EGL.
+    """Disable EGL so CALVIN renders on the CPU (PyBullet TinyRenderer).
 
-    Hardware (EGL) rendering shares the GPU with policy inference. On some driver/GPU
-    combos (H100 + heavy VLM) that intermittently ``Aborted (core dumped)`` mid-rollout.
-    Forcing the CPU renderer removes the GPU render path entirely, so nothing collides
-    with CUDA. Fast enough for CALVIN's small (200x200 / 84x84) frames.
+    Once PyBullet's ``eglRendererPlugin`` is loaded it intercepts *every*
+    ``getCameraImage`` call and routes it through the GPU, ignoring any
+    ``renderer=ER_TINY_RENDERER`` flag. That GPU render path shares the device with
+    policy inference: on H100 + a heavy VLM it corrupts frames (black + noise strip)
+    right after each CUDA forward and eventually ``Aborted (core dumped)``.
 
-    Call once BEFORE any rollout (env creation is fine too).
+    We prevent the plugin from ever loading by forcing ``use_egl=False`` on the env.
+    PyBullet then connects in DIRECT mode and uses the CPU software renderer for all
+    frames — no GPU rendering, nothing to collide with CUDA. Must be called BEFORE
+    ``get_env``. Rendering CALVIN's small (200x200 / 84x84) frames on CPU is cheap.
     """
-    import pybullet as p
+    from calvin_env.envs.play_table_env import PlayTableSimEnv
 
-    if getattr(p, "_lfm_cpu_render_patched", False):
+    if getattr(PlayTableSimEnv, "_lfm_no_egl", False):
         return
 
-    orig_get_camera_image = p.getCameraImage
+    orig_init = PlayTableSimEnv.__init__
 
-    def _cpu_get_camera_image(*args, **kwargs):
-        kwargs.setdefault("renderer", p.ER_TINY_RENDERER)
-        return orig_get_camera_image(*args, **kwargs)
+    def _init_no_egl(self, *args, **kwargs):
+        kwargs["use_egl"] = False
+        orig_init(self, *args, **kwargs)
 
-    p.getCameraImage = _cpu_get_camera_image
-    p._lfm_cpu_render_patched = True
-    print("[render] forced CPU TinyRenderer for CALVIN cameras (EGL/CUDA-safe)", flush=True)
+    PlayTableSimEnv.__init__ = _init_no_egl
+    PlayTableSimEnv._lfm_no_egl = True
+    print("[render] disabled EGL; CALVIN renders on CPU TinyRenderer (GPU-safe)", flush=True)
 
 
 def _ensure_pyhash() -> None:

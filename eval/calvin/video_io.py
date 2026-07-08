@@ -58,11 +58,12 @@ def _write_mp4_imageio(arr: np.ndarray, path: Path, fps: int) -> None:
     import imageio
 
     # v2 API — works with ``pip install imageio-ffmpeg``.
+    # macro_block_size=1 keeps native 200x200 (no auto-resize-to-208 warning).
     try:
-        imageio.mimwrite(path, arr, fps=fps, codec="libx264", quality=8)
+        imageio.mimwrite(path, arr, fps=fps, codec="libx264", quality=8, macro_block_size=1)
         return
     except TypeError:
-        # Older imageio builds may not accept ``quality``.
+        # Older imageio builds may not accept these kwargs.
         imageio.mimwrite(path, arr, fps=fps, codec="libx264")
         return
     except Exception:
