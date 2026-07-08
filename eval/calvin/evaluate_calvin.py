@@ -43,7 +43,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from eval.calvin.obs_utils import obs_to_uint8_rgb
+from eval.calvin.obs_utils import capture_rgb_static, obs_to_uint8_rgb
 from models.model_backbone import load_config
 from eval.calvin.model_wrapper import LFMCalvinModel
 
@@ -77,20 +77,23 @@ def pin_egl_device(device: str) -> None:
     """
     if not str(device).startswith("cuda"):
         return
-    if "EGL_VISIBLE_DEVICES" in os.environ:
-        return
-    try:
-        import torch
-        from calvin_env.utils.utils import set_egl_device
 
-        set_egl_device(torch.device(device))
-        print(f"[egl] pinned EGL_VISIBLE_DEVICES={os.environ.get('EGL_VISIBLE_DEVICES')} "
-              f"for {device}", flush=True)
-    except Exception as exc:  # noqa: BLE001
-        cuda_idx = device.split(":")[1] if ":" in device else "0"
-        os.environ["EGL_VISIBLE_DEVICES"] = cuda_idx
-        print(f"[egl] set_egl_device unavailable ({exc}); "
-              f"fell back to EGL_VISIBLE_DEVICES={cuda_idx}", flush=True)
+    import torch
+    from calvin_env.utils.utils import EglDeviceNotFoundError, get_egl_device_id
+
+    if "EGL_VISIBLE_DEVICES" in os.environ:
+        print(f"[egl] EGL_VISIBLE_DEVICES already set to {os.environ['EGL_VISIBLE_DEVICES']}; "
+              "remapping via get_egl_device_id()", flush=True)
+
+    cuda_id = torch.device(device).index or 0
+    try:
+        egl_id = get_egl_device_id(cuda_id)
+    except EglDeviceNotFoundError as exc:
+        egl_id = 0
+        print(f"[egl] get_egl_device_id failed ({exc}); falling back to EGL device 0", flush=True)
+
+    os.environ["EGL_VISIBLE_DEVICES"] = str(egl_id)
+    print(f"[egl] pinned EGL_VISIBLE_DEVICES={egl_id} for CUDA device {cuda_id}", flush=True)
 
 
 def _ensure_pyhash() -> None:
@@ -141,13 +144,24 @@ def _rollout_stem(out_dir: Path, seq_i: int, subtask_i: int, subtask: str) -> Pa
 
 
 def _is_valid_frame(frame: np.ndarray) -> bool:
-    return (
-        frame.ndim == 3
-        and frame.shape[2] == 3
-        and frame.shape[0] >= 64
-        and frame.shape[1] >= 64
-        and float(frame.std()) > 2.0
-    )
+    if frame.ndim != 3 or frame.shape[2] != 3 or frame.shape[0] < 64 or frame.shape[1] < 64:
+        return False
+    # Reject EGL readback garbage: mostly black with a noisy strip (std>2 but mean~0).
+    mean = float(frame.mean())
+    std = float(frame.std())
+    return mean > 20.0 and std > 5.0
+
+
+def _record_frame(recorder, obs, step_i: int) -> None:
+    frame = capture_rgb_static(obs)
+    if not _is_valid_frame(frame):
+        print(f"  [warn] skipped invalid frame at step {step_i} "
+              f"(mean={frame.mean():.1f}, std={frame.std():.1f})", flush=True)
+        return
+    recorder.add(frame)
+    if step_i % 30 == 0:
+        print(f"  recorded frame {recorder.count}", flush=True)
+        recorder.snapshot()
 
 
 def rollout(env, model, task_oracle, subtask, val_annotations, out_dir, seq_i, subtask_i,
@@ -164,19 +178,24 @@ def rollout(env, model, task_oracle, subtask, val_annotations, out_dir, seq_i, s
     recorder = FrameRecorder(out_dir, stem.name, fps=video_fps) if save_video else None
     try:
         for step_i in range(episode_len):
-            action = model.step(obs, lang, execute_step=execute_step)
-            obs, _, _, current_info = env.step(action)
+            # Re-render now, before CUDA touches the GPU. env.step() returns an obs
+            # rendered immediately after the previous model.step(), when the EGL
+            # buffer is often corrupted (black + noise strip).
+            obs = env.get_obs()
             if recorder is not None:
-                frame = obs_to_uint8_rgb(obs)
-                if _is_valid_frame(frame):
-                    recorder.add(frame)
-                    if step_i % 30 == 0:
-                        print(f"  recorded frame {recorder.count}", flush=True)
-                        # Flush a partial MP4 so a crash mid-rollout still leaves a video.
-                        recorder.snapshot()
+                _record_frame(recorder, obs, step_i)
+
+            action = model.step(obs, lang, execute_step=execute_step)
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+
+            obs, _, _, current_info = env.step(action)
             done = task_oracle.get_task_info_for_set(start_info, current_info, {subtask})
             if len(done) > 0:
                 success = True
+                if recorder is not None:
+                    _record_frame(recorder, env.get_obs(), step_i + 1)
                 return True
         return False
     finally:
