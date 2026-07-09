@@ -45,10 +45,10 @@ pip install --no-cache-dir --force-reinstall --no-deps \
 
 echo "=== 3. Verify ==="
 python - <<'PY'
+from importlib.metadata import version
 import google.protobuf
 print("protobuf", google.protobuf.__version__, "->", google.protobuf.__file__)
-import tensorflow_metadata as tfm
-print("tensorflow-metadata", tfm.__version__)
+print("tensorflow-metadata", version("tensorflow-metadata"))
 import numpy as np
 print("numpy", np.__version__)
 import tensorflow as tf
