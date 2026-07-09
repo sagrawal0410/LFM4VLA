@@ -1,15 +1,18 @@
 # LIBERO RLDS data loading (TensorFlow side). Install AFTER your PyTorch/LFM deps.
 # Usage (on cluster login node):
 #   conda activate lfm4vla
-#   pip install -r requirements-libero-rlds.txt
+#   bash scripts/install_libero_rlds_deps.sh
 #
-# If protobuf errors persist, run the cleanup block in scripts/install_libero_rlds_deps.sh first.
+# Version notes:
+#   - protobuf>=4.21 is required for tensorflow-metadata's generated proto files
+#     (import google.protobuf.runtime_version).
+#   - tensorflow-metadata 1.14.x requires protobuf<4.21 — do NOT use with this file.
 
 numpy==1.26.4
 protobuf==4.25.3
+tensorflow-metadata==1.15.0
 tensorflow==2.15.0
 tensorflow-datasets==4.9.3
-tensorflow-metadata==1.14.0
 ml-dtypes>=0.2.0,<0.4.0
 tensorflow-graphics==2021.12.3
 absl-py

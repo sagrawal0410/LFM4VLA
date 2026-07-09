@@ -21,8 +21,15 @@ if [[ -n "${CONDA_PREFIX:-}" ]]; then
   rm -rf "${SP}/google/protobuf" "${SP}/google/protobuf-"*.dist-info "${SP}/protobuf-"*.dist-info 2>/dev/null || true
 fi
 
-echo "=== 2. Install pinned RLDS stack ==="
-pip install --no-cache-dir -r requirements-libero-rlds.txt
+echo "=== 2. Install pinned RLDS stack (ordered to avoid resolver conflicts) ==="
+pip install --no-cache-dir "numpy==1.26.4" "protobuf==4.25.3"
+pip install --no-cache-dir "tensorflow-metadata==1.15.0"
+pip install --no-cache-dir \
+  "tensorflow==2.15.0" \
+  "tensorflow-datasets==4.9.3" \
+  "ml-dtypes>=0.2.0,<0.4.0" \
+  "tensorflow-graphics==2021.12.3" \
+  "absl-py" "rich" "tqdm"
 pip install --no-cache-dir --no-deps --force-reinstall \
   git+https://github.com/moojink/dlimp_openvla
 
