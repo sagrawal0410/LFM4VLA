@@ -21,26 +21,34 @@ if [[ -n "${CONDA_PREFIX:-}" ]]; then
   rm -rf "${SP}/google/protobuf" "${SP}/google/protobuf-"*.dist-info "${SP}/protobuf-"*.dist-info 2>/dev/null || true
 fi
 
+# Also remove any too-new tensorflow-metadata whose generated *_pb2.py call
+# `google.protobuf.runtime_version` (only exists in protobuf 5.26+, breaks TF 2.15).
+pip uninstall -y tensorflow-metadata 2>/dev/null || true
+
 echo "=== 2. Install pinned RLDS stack (ordered to avoid resolver conflicts) ==="
-pip install --no-cache-dir "numpy==1.26.4" "protobuf==4.25.3"
-pip install --no-cache-dir "tensorflow-metadata==1.15.0"
-pip install --no-cache-dir \
+# protobuf 3.20.3 + tensorflow-metadata 1.14.0 is the coherent combo for TF 2.15.
+pip install --no-cache-dir "numpy==1.26.4" "protobuf==3.20.3"
+pip install --no-cache-dir "tensorflow-metadata==1.14.0"
+pip install --no-cache-dir --no-deps \
   "tensorflow==2.15.0" \
-  "tensorflow-datasets==4.9.3" \
+  "tensorflow-datasets==4.9.3"
+pip install --no-cache-dir \
   "ml-dtypes>=0.2.0,<0.4.0" \
   "tensorflow-graphics==2021.12.3" \
   "absl-py" "rich" "tqdm"
 pip install --no-cache-dir --no-deps --force-reinstall \
   git+https://github.com/moojink/dlimp_openvla
 
-# Re-pin protobuf last (other packages sometimes pull 3.x)
-pip install --no-cache-dir --force-reinstall "protobuf==4.25.3"
+# Re-pin protobuf + metadata last in case a dep pulled newer ones.
+pip install --no-cache-dir --force-reinstall --no-deps \
+  "protobuf==3.20.3" "tensorflow-metadata==1.14.0"
 
 echo "=== 3. Verify ==="
 python - <<'PY'
 import google.protobuf
 print("protobuf", google.protobuf.__version__, "->", google.protobuf.__file__)
-from google.protobuf import runtime_version  # noqa: F401
+import tensorflow_metadata as tfm
+print("tensorflow-metadata", tfm.__version__)
 import numpy as np
 print("numpy", np.__version__)
 import tensorflow as tf

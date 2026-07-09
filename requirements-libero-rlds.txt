@@ -3,14 +3,17 @@
 #   conda activate lfm4vla
 #   bash scripts/install_libero_rlds_deps.sh
 #
-# Version notes:
-#   - protobuf>=4.21 is required for tensorflow-metadata's generated proto files
-#     (import google.protobuf.runtime_version).
-#   - tensorflow-metadata 1.14.x requires protobuf<4.21 — do NOT use with this file.
+# Version notes (this combo is internally consistent — no resolver conflicts):
+#   - TF 2.15 requires protobuf 3.20.3 (protobuf>=3.20.3,<5, but the ecosystem
+#     is only tested at 3.20.3 here).
+#   - The `runtime_version` ImportError comes from a TOO-NEW tensorflow-metadata
+#     whose generated *_pb2.py were built with protoc 5.x (needs protobuf>=5.26).
+#     Pinning tensorflow-metadata==1.14.0 uses protoc 3.x protos -> no runtime_version.
+#   - Do NOT upgrade protobuf to 4.x/5.x; that breaks TF 2.15.
 
 numpy==1.26.4
-protobuf==4.25.3
-tensorflow-metadata==1.15.0
+protobuf==3.20.3
+tensorflow-metadata==1.14.0
 tensorflow==2.15.0
 tensorflow-datasets==4.9.3
 ml-dtypes>=0.2.0,<0.4.0
