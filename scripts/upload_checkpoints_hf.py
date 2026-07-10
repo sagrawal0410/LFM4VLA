@@ -1,31 +1,33 @@
-"""Upload LFM4VLA checkpoints (+ their run config) to a HuggingFace model repo.
+"""Upload LFM4VLA checkpoints and/or the full runs/logs tree to HuggingFace.
 
-Local layout:
+Local layout (cluster):
     runs/checkpoints/<date>/<run_name>/<file>.ckpt
-    runs/logs/<date>/<run_name>/<run_name>-config.json
+    runs/logs/<date>/<run_name>/<run_name>-config.json  (+ wandb/lightning artifacts)
 
-Hub layout (mirrors the date folder):
-    <date>/<run_name>/<file>.ckpt
-    <date>/<run_name>/<run_name>-config.json
+Hub layout (checkpoints):
+    checkpoints/<date>/<run_name>/<file>.ckpt
+
+Hub layout (full logs tree — preserves cluster structure):
+    logs/<date>/<run_name>/...
 
 Usage:
     huggingface-cli login            # or export HF_TOKEN=...
 
-    # Upload every run + checkpoint under a date folder:
+    # Checkpoints + entire logs tree for one date:
     python scripts/upload_checkpoints_hf.py \
         --repo-id <user>/lfm4vla-checkpoints \
-        --date-dir runs/checkpoints/2026-07-02
+        --date 2026-07-02 \
+        --logs-date 2026-07-02
 
-    # Shorthand (same thing):
+    # Logs only (exact runs/logs structure):
     python scripts/upload_checkpoints_hf.py \
         --repo-id <user>/lfm4vla-checkpoints \
-        --date 2026-07-02
+        --logs-only --logs-date 2026-07-02
 
-    # Single run or individual checkpoints still work:
-    python scripts/upload_checkpoints_hf.py --repo-id <user>/repo \
-        --run-dir runs/checkpoints/2026-07-02/lfm450m_libero10-...
-    python scripts/upload_checkpoints_hf.py --repo-id <user>/repo \
-        --ckpt runs/checkpoints/2026-07-02/<run>/last.ckpt
+    # Entire runs/logs tree:
+    python scripts/upload_checkpoints_hf.py \
+        --repo-id <user>/lfm4vla-checkpoints \
+        --logs-only --logs-dir runs/logs
 """
 
 from __future__ import annotations
@@ -38,14 +40,28 @@ from pathlib import Path
 from huggingface_hub import HfApi
 
 
+def resolve_path(path: str) -> Path:
+    p = Path(path)
+    return p if p.is_absolute() else Path.cwd() / p
+
+
 def resolve_date_dir(date: str | None, date_dir: str | None, checkpoint_root: str) -> Path | None:
     if date_dir:
-        path = Path(date_dir)
-        if not path.is_absolute():
-            path = Path.cwd() / path
-        return path
+        return resolve_path(date_dir)
     if date:
-        return Path(checkpoint_root) / date
+        return resolve_path(checkpoint_root) / date
+    return None
+
+
+def resolve_logs_dir(
+    logs_date: str | None,
+    logs_dir: str | None,
+    log_root: str,
+) -> Path | None:
+    if logs_dir:
+        return resolve_path(logs_dir)
+    if logs_date:
+        return resolve_path(log_root) / logs_date
     return None
 
 
@@ -65,14 +81,15 @@ def collect_ckpts(
             raise FileNotFoundError(f"date dir not found: {date_dir}")
         ckpts += [Path(p) for p in sorted(date_dir.glob("*/*.ckpt"))]
 
-    # De-dupe while preserving order.
     return list(dict.fromkeys(ckpts))
 
 
+def run_key(ckpt: Path) -> tuple[str, str]:
+    return ckpt.parent.parent.name, ckpt.parent.name
+
+
 def find_config(ckpt: Path, log_root: str) -> Path | None:
-    """Locate <run_name>-config.json for a checkpoint via the parallel logs tree."""
-    run_name = ckpt.parent.name
-    date_dir = ckpt.parent.parent.name
+    date_dir, run_name = run_key(ckpt)
     candidate = Path(log_root) / date_dir / run_name / f"{run_name}-config.json"
     if candidate.is_file():
         return candidate
@@ -80,9 +97,88 @@ def find_config(ckpt: Path, log_root: str) -> Path | None:
     return Path(matches[0]) if matches else None
 
 
-def hub_prefix(ckpt: Path) -> str:
-    """Repo subfolder: <date>/<run_name>/"""
-    return f"{ckpt.parent.parent.name}/{ckpt.parent.name}"
+def hub_ckpt_path(ckpt: Path) -> str:
+    date_dir, run_name = run_key(ckpt)
+    return f"checkpoints/{date_dir}/{run_name}/{ckpt.name}"
+
+
+def hub_config_path(ckpt: Path, cfg: Path, separate: bool) -> str:
+    date_dir, run_name = run_key(ckpt)
+    if separate:
+        return f"configs/{date_dir}/{run_name}/{cfg.name}"
+    return f"checkpoints/{date_dir}/{run_name}/{cfg.name}"
+
+
+def hub_logs_prefix(local_logs: Path, log_root: Path) -> str:
+    """Map local logs path to hub prefix under logs/."""
+    try:
+        rel = local_logs.resolve().relative_to(log_root.resolve())
+    except ValueError:
+        rel = local_logs.name
+    return f"logs/{rel}".rstrip("/")
+
+
+def upload_logs_tree(api: HfApi, repo_id: str, local_logs: Path, log_root: Path) -> None:
+    if not local_logs.is_dir():
+        raise FileNotFoundError(f"logs dir not found: {local_logs}")
+    dest = hub_logs_prefix(local_logs, log_root)
+    print(f"[upload folder] {local_logs}  ->  {repo_id}/{dest}/")
+    api.upload_folder(
+        folder_path=str(local_logs),
+        path_in_repo=dest,
+        repo_id=repo_id,
+        repo_type="model",
+    )
+
+
+def upload_checkpoints(
+    api: HfApi,
+    repo_id: str,
+    ckpts: list[Path],
+    log_root: str,
+    *,
+    separate_configs: bool,
+    pair_configs: bool,
+) -> None:
+    uploaded_configs: set[tuple[str, str]] = set()
+    layout = "checkpoints/ + configs/" if separate_configs else "checkpoints/ (configs co-located)"
+    print(f"Uploading {len(ckpts)} checkpoint(s) ({layout})")
+
+    for ckpt in ckpts:
+        if not ckpt.is_file():
+            print(f"[skip] not found: {ckpt}")
+            continue
+
+        ckpt_dest = hub_ckpt_path(ckpt)
+        print(f"[upload] {ckpt}  ->  {repo_id}/{ckpt_dest}")
+        api.upload_file(
+            path_or_fileobj=str(ckpt),
+            path_in_repo=ckpt_dest,
+            repo_id=repo_id,
+            repo_type="model",
+        )
+
+        if not pair_configs:
+            continue
+
+        key = run_key(ckpt)
+        if key in uploaded_configs:
+            continue
+
+        cfg = find_config(ckpt, log_root)
+        if cfg is None:
+            print(f"  [warn] no config for {key[1]} under {log_root}/{key[0]}/")
+            continue
+
+        cfg_dest = hub_config_path(ckpt, cfg, separate=separate_configs)
+        print(f"  [upload] {cfg}  ->  {repo_id}/{cfg_dest}")
+        api.upload_file(
+            path_or_fileobj=str(cfg),
+            path_in_repo=cfg_dest,
+            repo_id=repo_id,
+            repo_type="model",
+        )
+        uploaded_configs.add(key)
 
 
 def main() -> None:
@@ -90,69 +186,65 @@ def main() -> None:
     ap.add_argument("--repo-id", required=True, help="e.g. your-username/lfm4vla-checkpoints")
     ap.add_argument("--ckpt", action="append", default=[], help="path to a .ckpt (repeatable)")
     ap.add_argument("--run-dir", default=None, help="upload every *.ckpt in one run directory")
+    ap.add_argument("--date-dir", default=None, help="e.g. runs/checkpoints/2026-07-02")
+    ap.add_argument("--date", default=None, help="shorthand: runs/checkpoints/<date>")
+    ap.add_argument("--checkpoint-root", default="runs/checkpoints")
+    ap.add_argument("--log-root", default="runs/logs", help="local runs/logs root")
+
     ap.add_argument(
-        "--date-dir",
+        "--logs-date",
         default=None,
-        help="upload every run under a date folder, e.g. runs/checkpoints/2026-07-02",
+        help="upload entire runs/logs/<date>/ tree to logs/<date>/ on the Hub",
     )
     ap.add_argument(
-        "--date",
+        "--logs-dir",
         default=None,
-        help="shorthand for --date-dir runs/checkpoints/<date>",
+        help="upload an arbitrary logs folder to logs/<relative-path>/ on the Hub",
     )
     ap.add_argument(
-        "--checkpoint-root",
-        default="runs/checkpoints",
-        help="root used with --date (default: runs/checkpoints)",
+        "--logs-only",
+        action="store_true",
+        help="skip checkpoints; only upload the logs tree (--logs-date or --logs-dir required)",
     )
-    ap.add_argument("--log-root", default="runs/logs", help="root of the logs tree with configs")
-    ap.add_argument("--private", action="store_true", help="create the repo as private")
-    ap.add_argument("--token", default=os.environ.get("HF_TOKEN"), help="HF token (or use login)")
+    ap.add_argument(
+        "--flat",
+        action="store_true",
+        help="when pairing configs with checkpoints, put them under checkpoints/<date>/<run>/",
+    )
+    ap.add_argument(
+        "--no-pair-configs",
+        action="store_true",
+        help="skip per-checkpoint config uploads (use with --logs-date to upload configs via logs tree)",
+    )
+    ap.add_argument("--private", action="store_true")
+    ap.add_argument("--token", default=os.environ.get("HF_TOKEN"))
     args = ap.parse_args()
 
+    log_root = resolve_path(args.log_root)
+    logs_target = resolve_logs_dir(args.logs_date, args.logs_dir, str(log_root))
     date_dir = resolve_date_dir(args.date, args.date_dir, args.checkpoint_root)
     ckpts = collect_ckpts(ckpt_paths=args.ckpt, run_dir=args.run_dir, date_dir=date_dir)
-    if not ckpts:
-        ap.error("no checkpoints found; use --date/--date-dir, --run-dir, and/or --ckpt")
+
+    if args.logs_only and logs_target is None:
+        ap.error("--logs-only requires --logs-date or --logs-dir")
+    if not args.logs_only and not ckpts and logs_target is None:
+        ap.error("nothing to upload; use --date, --logs-date, --logs-dir, etc.")
 
     api = HfApi(token=args.token)
     api.create_repo(args.repo_id, repo_type="model", private=args.private, exist_ok=True)
 
-    uploaded_configs: set[str] = set()
-    print(f"Uploading {len(ckpts)} checkpoint(s) to {args.repo_id}")
-
-    for ckpt in ckpts:
-        if not ckpt.is_file():
-            print(f"[skip] not found: {ckpt}")
-            continue
-
-        prefix = hub_prefix(ckpt)
-        ckpt_dest = f"{prefix}/{ckpt.name}"
-        print(f"[upload] {ckpt}  ->  {args.repo_id}/{ckpt_dest}")
-        api.upload_file(
-            path_or_fileobj=str(ckpt),
-            path_in_repo=ckpt_dest,
-            repo_id=args.repo_id,
-            repo_type="model",
+    if not args.logs_only and ckpts:
+        upload_checkpoints(
+            api,
+            args.repo_id,
+            ckpts,
+            str(log_root),
+            separate_configs=not args.flat,
+            pair_configs=not args.no_pair_configs,
         )
 
-        if prefix in uploaded_configs:
-            continue
-
-        cfg = find_config(ckpt, args.log_root)
-        if cfg is None:
-            print(f"  [warn] no config found for {prefix} under {args.log_root}")
-            continue
-
-        cfg_dest = f"{prefix}/{cfg.name}"
-        print(f"  [upload] {cfg}  ->  {args.repo_id}/{cfg_dest}")
-        api.upload_file(
-            path_or_fileobj=str(cfg),
-            path_in_repo=cfg_dest,
-            repo_id=args.repo_id,
-            repo_type="model",
-        )
-        uploaded_configs.add(prefix)
+    if logs_target is not None:
+        upload_logs_tree(api, args.repo_id, logs_target, log_root)
 
     print("Done:", f"https://huggingface.co/{args.repo_id}")
 
