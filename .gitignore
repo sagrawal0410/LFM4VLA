@@ -1,0 +1,46 @@
+# Training / eval artifacts (upload to HuggingFace, not GitHub)
+runs/
+
+# SLURM job logs (repo root)
+output_*.out
+output_*.err
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.so
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Secrets / local env
+.env
+.env.*
+*.pem
+
+# W&B (local runs; configs live under runs/logs if needed)
+wandb/
+
+# Large packed conda envs (specs in envs/*.yml belong in git; tarballs do not)
+envs/packed/
+*.tar.gz
+
+# Checkpoints accidentally copied outside runs/
+*.ckpt
+
+# TensorFlow / dataset caches
+~/.cache/orca/
+dataset_statistics_*.json
+
+# HuggingFace / torch caches (local only)
+.cache/

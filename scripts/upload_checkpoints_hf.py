@@ -7,8 +7,11 @@ Local layout (cluster):
 Hub layout (checkpoints):
     checkpoints/<date>/<run_name>/<file>.ckpt
 
-Hub layout (full logs tree — preserves cluster structure):
-    logs/<date>/<run_name>/...
+Hub layout (run configs only — default for --logs-date):
+    logs/<date>/<run_name>/<run_name>-config.json
+
+Use --logs-full-tree to upload everything under runs/logs/ (wandb artifacts, etc.).
+SLURM output_*.out/*.err in repo root are never uploaded (not under runs/logs).
 
 Usage:
     huggingface-cli login            # or export HF_TOKEN=...
@@ -118,16 +121,44 @@ def hub_logs_prefix(local_logs: Path, log_root: Path) -> str:
     return f"logs/{rel}".rstrip("/")
 
 
-def upload_logs_tree(api: HfApi, repo_id: str, local_logs: Path, log_root: Path) -> None:
+def upload_logs_tree(
+    api: HfApi,
+    repo_id: str,
+    local_logs: Path,
+    log_root: Path,
+    *,
+    configs_only: bool,
+) -> None:
     if not local_logs.is_dir():
         raise FileNotFoundError(f"logs dir not found: {local_logs}")
-    dest = hub_logs_prefix(local_logs, log_root)
-    print(f"[upload folder] {local_logs}  ->  {repo_id}/{dest}/")
+
+    dest_prefix = hub_logs_prefix(local_logs, log_root)
+
+    if configs_only:
+        configs = sorted(local_logs.glob("*/*-config.json"))
+        if not configs:
+            print(f"[warn] no *-config.json under {local_logs}")
+            return
+        print(f"[upload] {len(configs)} run config(s) from {local_logs}")
+        for cfg in configs:
+            rel = cfg.relative_to(local_logs)
+            dest = f"{dest_prefix}/{rel}"
+            print(f"  {cfg}  ->  {repo_id}/{dest}")
+            api.upload_file(
+                path_or_fileobj=str(cfg),
+                path_in_repo=dest,
+                repo_id=repo_id,
+                repo_type="model",
+            )
+        return
+
+    print(f"[upload folder] {local_logs}  ->  {repo_id}/{dest_prefix}/")
     api.upload_folder(
         folder_path=str(local_logs),
-        path_in_repo=dest,
+        path_in_repo=dest_prefix,
         repo_id=repo_id,
         repo_type="model",
+        ignore_patterns=["*.out", "*.err", "wandb/**", "**/__pycache__/**"],
     )
 
 
@@ -194,12 +225,17 @@ def main() -> None:
     ap.add_argument(
         "--logs-date",
         default=None,
-        help="upload entire runs/logs/<date>/ tree to logs/<date>/ on the Hub",
+        help="upload run *-config.json files from runs/logs/<date>/ (default: configs only)",
     )
     ap.add_argument(
         "--logs-dir",
         default=None,
-        help="upload an arbitrary logs folder to logs/<relative-path>/ on the Hub",
+        help="upload from an arbitrary runs/logs subfolder",
+    )
+    ap.add_argument(
+        "--logs-full-tree",
+        action="store_true",
+        help="upload entire logs folder (not just *-config.json); still skips *.out/*.err",
     )
     ap.add_argument(
         "--logs-only",
@@ -244,7 +280,13 @@ def main() -> None:
         )
 
     if logs_target is not None:
-        upload_logs_tree(api, args.repo_id, logs_target, log_root)
+        upload_logs_tree(
+            api,
+            args.repo_id,
+            logs_target,
+            log_root,
+            configs_only=not args.logs_full_tree,
+        )
 
     print("Done:", f"https://huggingface.co/{args.repo_id}")
 
