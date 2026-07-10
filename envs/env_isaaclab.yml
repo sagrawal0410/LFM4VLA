@@ -1,0 +1,7 @@
+name: env_isaaclab
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+prefix: /home/shaurya/miniconda3/envs/env_isaaclab
+
