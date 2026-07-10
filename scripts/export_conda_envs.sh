@@ -24,7 +24,7 @@ export_env() {
   conda run -n "$name" pip freeze > "$OUT/${name}-pip-freeze.txt"
 }
 
-for env in lfm4vla lfm4vla-libero calvin_eval; do
+for env in lfm4vla lfm4vla-libero calvin_eval env_isaaclab; do
   export_env "$env"
 done
 
