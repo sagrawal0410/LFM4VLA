@@ -1,0 +1,7 @@
+name: lfm4vla-libero
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+prefix: /home/shaurya/miniconda3/envs/lfm4vla-libero
+
