@@ -2,6 +2,8 @@ import io
 import json
 import logging
 import os
+
+logger = logging.getLogger(__name__)
 import random
 import tarfile
 from dataclasses import dataclass
@@ -35,7 +37,6 @@ try:
     from data.data_utils import world_to_tcp_frame
 
     # hasher = pyhash.fnv1_32()
-    logger = logging.getLogger(__name__)
     pass
 except:
     pass
