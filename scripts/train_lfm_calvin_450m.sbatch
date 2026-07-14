@@ -6,7 +6,6 @@
 #SBATCH --cpus-per-gpu=12
 #SBATCH --output=output_lfm4vla_%j.out
 #SBATCH --error=output_lfm4vla_%j.err
-#SBATCH --account=liquidai
 
 set -euo pipefail
 
