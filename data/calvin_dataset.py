@@ -25,21 +25,18 @@ from torch.utils.data.distributed import DistributedSampler
 try:
     from calvin_agent.datasets.utils.episode_utils import (
         get_state_info_dict,
+        lookup_naming_pattern,
         process_actions,
         process_depth,
         process_state,
     )
-    from calvin_agent.datasets.utils.episode_utils import lookup_naming_pattern
-
-    # import pyhash
-    import torch
-    from torch.utils.data import Dataset
     from data.data_utils import world_to_tcp_frame
-
-    # hasher = pyhash.fnv1_32()
-    pass
-except:
-    pass
+except ImportError as exc:
+    raise ImportError(
+        "calvin_agent is required for DiskCalvinDataset. Install the CALVIN "
+        "models package in your training env, e.g.\n"
+        "  pip install -e /path/to/calvin/calvin_models"
+    ) from exc
 
 Image.MAX_IMAGE_PIXELS = 1000000000
 MAX_NUM_TOKENS = 256
