@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
-#SBATCH --cpus-per-gpu=12
+#SBATCH --cpus-per-gpu=14
 #SBATCH --output=output_lfm4vla_%j.out
 #SBATCH --error=output_lfm4vla_%j.err
 
