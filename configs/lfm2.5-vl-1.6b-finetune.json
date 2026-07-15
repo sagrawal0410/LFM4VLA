@@ -55,7 +55,7 @@
         "hidden_size": 1024,
         "action_dim": 7,
         "down_sample": "none",
-        "latent": 2,
+        "latent": 8,
         "fwd_pred_next_n": 1,
         "window_size": 1,
         "action_space": "continuous",
