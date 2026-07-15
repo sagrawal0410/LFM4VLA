@@ -92,7 +92,7 @@
     },
     "train_dataset": {
         "type": "LiberoRLDSDataset",
-        "data_root_dir": "/lambdafs/datasets/lfm4vla_libero/modified_libero_rlds",
+        "data_root_dir": "/home/teams/research/robotics/modified_libero_rlds",
         "data_mix": "libero_10_no_noops",
         "image_size": 224,
         "image_aug": true,
@@ -101,7 +101,7 @@
     },
     "val_dataset": {
         "type": "LiberoRLDSDataset",
-        "data_root_dir": "/lambdafs/datasets/lfm4vla_libero/modified_libero_rlds",
+        "data_root_dir": "/home/teams/research/robotics/modified_libero_rlds",
         "data_mix": "libero_10_no_noops",
         "image_size": 224,
         "image_aug": false,
