@@ -4,7 +4,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-gpu=14
-#SBATCH --exclude=tus1-p13-g58, tus1-p13-g13, tus1-p13-g39, tus1-p13-g33
+#SBATCH --exclude=tus1-p13-g58,tus1-p13-g13,tus1-p13-g39,tus1-p13-g33
 #SBATCH --output=output_lfm4vla_%j.out
 #SBATCH --error=output_lfm4vla_%j.err
 
