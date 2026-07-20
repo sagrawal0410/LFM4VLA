@@ -11,7 +11,7 @@ set -euo pipefail
 
 # --- edit these for your cluster layout ---
 LFM4VLA_ROOT="${LFM4VLA_ROOT:-$HOME/LFM4VLA}"
-CONDA_ENV="${CONDA_ENV:-lfm4vla}"
+CONDA_ENV="${CONDA_ENV:-lfm4vla-libero}"
 CONFIG="${CONFIG:-configs/lfm2.5-vl-450m-libero.json}"
 
 # LIBERO streams RLDS through TensorFlow; keep TF off the GPU (PyTorch owns it).
