@@ -67,14 +67,15 @@ def _build_loader(dataset, variant, train: bool) -> DataLoader:
     """Build a DataLoader, adapting to map-style (CALVIN) vs iterable (LIBERO RLDS).
 
     Iterable RLDS streams handle their own shuffling (TF shuffle buffer) and cannot
-    use ``shuffle`` or a ``sampler``; they must also stay single-worker to avoid
-    duplicating the TensorFlow stream across worker processes.
+    use ``shuffle`` or a ``sampler``. They must run with ``num_workers=0`` (in the
+    main process): TensorFlow does not survive ``os.fork()``, so streaming the RLDS
+    pipeline inside a forked DataLoader worker deadlocks (no batch is ever yielded).
     """
     if isinstance(dataset, IterableDataset):
         return DataLoader(
             dataset,
             batch_size=variant["batch_size"],
-            num_workers=1,
+            num_workers=0,
             pin_memory=torch.cuda.is_available(),
             collate_fn=dataset.collater,
             drop_last=True,
