@@ -161,7 +161,9 @@ class LiberoRLDSDataset(IterableDataset):
 
             # Action window: [window_size + fwd_pred_next_n, 7]; drop the last
             # overlapping step so chunking yields exactly `window_size` chunks.
-            action = np.asarray(frame["action"], dtype=np.float32)[:-1]
+            # `np.array(..., copy=True)`: the TF-backed buffer is read-only, but we
+            # binarize the gripper in place below, so we need a writable array.
+            action = np.array(frame["action"], dtype=np.float32, copy=True)[:-1]
             action_mask = np.asarray(frame["chunk_mask"], dtype=np.float32)[:-1]
 
             if self.norm_action:
