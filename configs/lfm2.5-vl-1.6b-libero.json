@@ -96,7 +96,7 @@
         "data_mix": "libero_10_no_noops",
         "image_size": 224,
         "image_aug": true,
-        "shuffle_buffer_size": 51200,
+        "shuffle_buffer_size": 8000,
         "train": true
     },
     "val_dataset": {
