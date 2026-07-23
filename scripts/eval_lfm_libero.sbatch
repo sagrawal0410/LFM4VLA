@@ -29,9 +29,8 @@ conda activate "$CONDA_ENV"
 
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
-# Headless offscreen rendering for MuJoCo (needs EGL on the node).
-export MUJOCO_GL="${MUJOCO_GL:-egl}"
-export PYOPENGL_PLATFORM="$MUJOCO_GL"
+# auto = try GPU EGL, fall back to CPU OSMesa (needed on many SLURM nodes).
+export MUJOCO_GL="${MUJOCO_GL:-auto}"
 # Optional: override ~/.libero/config.yaml location (evaluate_libero.py auto-creates it).
 # export LIBERO_CONFIG_PATH="$HOME/.libero"
 

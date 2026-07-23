@@ -16,18 +16,23 @@
 #   pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision
 set -euo pipefail
 
-echo "[1/4] Core sim deps (mujoco, robosuite)..."
-pip install "mujoco>=3.1" "robosuite==1.4.1"
+echo "[1/5] Core sim deps (mujoco, robosuite)..."
+pip install "mujoco>=3.1" "robosuite==1.4.1" PyOpenGL PyOpenGL_accelerate
 
-echo "[2/4] LIBERO benchmark (from GitHub)..."
+echo "[2/5] Headless rendering fallbacks (EGL + OSMesa for SLURM nodes)..."
+if command -v conda >/dev/null 2>&1; then
+  conda install -y -c conda-forge mesalib libegl-devel || true
+fi
+
+echo "[3/5] LIBERO benchmark (from GitHub)..."
 # LIBERO is not on PyPI; install from source. Pin to a commit if you need reproducibility.
 pip install "git+https://github.com/Lifelong-Robot-Learning/LIBERO.git"
 
-echo "[3/4] Video + model runtime deps..."
+echo "[4/5] Video + model runtime deps..."
 pip install imageio imageio-ffmpeg opencv-python-headless pillow einops
 pip install "transformers>=4.46" accelerate safetensors
 
-echo "[4/4] Quick import smoke test..."
+echo "[5/5] Quick import smoke test..."
 python - <<'PY'
 import importlib.util
 import os
@@ -75,8 +80,8 @@ Done. Next steps on the workstation:
    and pass --data_root_dir pointing at its parent-of-parent, OR keep the same
    data_root_dir layout as the config.
 
-4. Run (EGL offscreen rendering; use MUJOCO_GL=glfw if you have a display and prefer it):
-     MUJOCO_GL=egl python eval/libero/evaluate_libero.py \
+4. Run (auto-picks EGL or OSMesa; use MUJOCO_GL=glfw if you have a display):
+     python eval/libero/evaluate_libero.py \
        --config runs/logs/<date>/<exp>/<exp>-config.json \
        --ckpt   runs/checkpoints/<date>/<exp>/last.ckpt \
        --task_suite libero_10 \

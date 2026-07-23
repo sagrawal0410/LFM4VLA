@@ -6,8 +6,8 @@ watch the policy.
 
 LIBERO is MuJoCo-based (robosuite). This needs the ``libero`` package + ``robosuite`` +
 ``mujoco`` installed (see scripts/install_libero_sim.sh). Best run on a workstation with a
-GPU and working offscreen GL (EGL), e.g. your RTX 5090; it can also run headless on a
-cluster node if EGL is available.
+GPU and working offscreen GL (EGL), e.g. your RTX 5090; on SLURM it auto-falls back to
+OSMesa (CPU) when EGL libs are missing.
 
 Example (local, RTX 5090):
     MUJOCO_GL=egl python eval/libero/evaluate_libero.py \
@@ -27,6 +27,7 @@ import faulthandler
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import time
 from collections import defaultdict
@@ -34,9 +35,6 @@ from pathlib import Path
 
 faulthandler.enable()
 
-# Offscreen GL for MuJoCo. EGL is the headless-friendly backend; override with MUJOCO_GL.
-os.environ.setdefault("MUJOCO_GL", "egl")
-os.environ.setdefault("PYOPENGL_PLATFORM", os.environ["MUJOCO_GL"])
 # Reduce CUDA allocator fragmentation across many small inference calls.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -100,6 +98,63 @@ def _ensure_libero_config() -> None:
     with open(config_file, "w") as f:
         yaml.dump(config, f)
     print(f"Created LIBERO config at {config_file}")
+
+
+def _probe_mujoco_gl(backend: str) -> bool:
+    """Return True if ``import mujoco`` works with the given GL backend."""
+    env = os.environ.copy()
+    env["MUJOCO_GL"] = backend
+    env["PYOPENGL_PLATFORM"] = backend
+    result = subprocess.run(
+        [sys.executable, "-c", "import mujoco"],
+        env=env,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def _configure_mujoco_gl(requested: str) -> str:
+    """Pick a headless MuJoCo backend before robosuite/mujoco are imported."""
+    if requested not in ("auto", "egl", "osmesa"):
+        raise ValueError(f"unsupported --mujoco_gl value: {requested}")
+
+    if requested != "auto":
+        os.environ["MUJOCO_GL"] = requested
+        os.environ["PYOPENGL_PLATFORM"] = requested
+        if not _probe_mujoco_gl(requested):
+            raise RuntimeError(
+                f"MuJoCo GL backend '{requested}' is unavailable in this environment.\n"
+                "For EGL (GPU offscreen): conda install -c conda-forge libegl-devel\n"
+                "For OSMesa (CPU offscreen): conda install -c conda-forge mesalib\n"
+                "Or try: --mujoco_gl auto"
+            )
+        print(f"[render] using MuJoCo GL backend: {requested}", flush=True)
+        return requested
+
+    candidates = []
+    env_pref = os.environ.get("MUJOCO_GL")
+    if env_pref and env_pref not in ("auto", ""):
+        candidates.append(env_pref)
+    for backend in ("egl", "osmesa"):
+        if backend not in candidates:
+            candidates.append(backend)
+
+    for backend in candidates:
+        if _probe_mujoco_gl(backend):
+            os.environ["MUJOCO_GL"] = backend
+            os.environ["PYOPENGL_PLATFORM"] = backend
+            print(f"[render] using MuJoCo GL backend: {backend}", flush=True)
+            return backend
+
+    raise RuntimeError(
+        "No headless MuJoCo GL backend available (tried: "
+        + ", ".join(candidates)
+        + ").\n"
+        "Install one of:\n"
+        "  conda install -c conda-forge libegl-devel   # GPU EGL (fastest)\n"
+        "  conda install -c conda-forge mesalib      # CPU OSMesa (cluster fallback)\n"
+        "Then re-run with --mujoco_gl auto (default) or --mujoco_gl osmesa."
+    )
 
 
 def _make_env(task, resolution: int = 256):
@@ -197,8 +252,12 @@ def main():
     ap.add_argument("--save_video", action="store_true", help="Write an MP4 per episode")
     ap.add_argument("--video_fps", type=int, default=20)
     ap.add_argument("--output_dir", default="runs/libero_eval")
+    ap.add_argument("--mujoco_gl", default=os.environ.get("MUJOCO_GL", "auto"),
+                    choices=["auto", "egl", "osmesa"],
+                    help="Headless MuJoCo renderer. 'auto' tries EGL then OSMesa.")
     args = ap.parse_args()
 
+    _configure_mujoco_gl(args.mujoco_gl)
     np.random.seed(args.seed)
 
     configs = load_config(args.config)
