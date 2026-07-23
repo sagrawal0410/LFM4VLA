@@ -9,6 +9,7 @@ from data.build_dataset import build_dataset
 from train.base_trainer import BaseTrainer
 from train.experiment_utils import build_loggers, prepare_experiment
 from utils.dist_train import get_rank
+from utils.memory_monitor import MemoryMonitor
 from utils.setup_callback import SetupCallback
 
 
@@ -71,12 +72,16 @@ def _build_loader(dataset, variant, train: bool) -> DataLoader:
     main process): TensorFlow does not survive ``os.fork()``, so streaming the RLDS
     pipeline inside a forked DataLoader worker deadlocks (no batch is ever yielded).
     """
+    # Off switch for debugging host-RAM growth: ROCm's pinned-memory caching
+    # allocator is a known suspect for unbounded RSS growth on AMD clusters.
+    pin_memory = variant.get("pin_memory", True) and torch.cuda.is_available()
+
     if isinstance(dataset, IterableDataset):
         return DataLoader(
             dataset,
             batch_size=variant["batch_size"],
             num_workers=0,
-            pin_memory=torch.cuda.is_available(),
+            pin_memory=pin_memory,
             collate_fn=dataset.collater,
             drop_last=True,
         )
@@ -84,7 +89,7 @@ def _build_loader(dataset, variant, train: bool) -> DataLoader:
         dataset,
         batch_size=variant["batch_size"],
         num_workers=variant.get("num_workers", 4),
-        pin_memory=torch.cuda.is_available(),
+        pin_memory=pin_memory,
         shuffle=train,
         collate_fn=dataset.collater,
         drop_last=train,
@@ -116,6 +121,7 @@ def experiment(variant):
     callbacks = [
         SetupCallback(log_dir, ckpt_dir, variant, exp_name),
         LearningRateMonitor(logging_interval="step"),
+        MemoryMonitor(every_n_steps=variant.get("mem_log_every_n_steps", 50)),
         *_build_model_checkpoints(ckpt_dir, trainer_cfg),
     ]
 

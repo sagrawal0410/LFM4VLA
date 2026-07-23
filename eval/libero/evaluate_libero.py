@@ -1,0 +1,253 @@
+"""Single-GPU LIBERO closed-loop evaluation + video recording for LFM4VLA checkpoints.
+
+Runs a LIBERO task suite (e.g. ``libero_10``) in the robosuite/MuJoCo simulator, writes
+a per-task / overall success-rate summary, and (optionally) an MP4 per episode so you can
+watch the policy.
+
+LIBERO is MuJoCo-based (robosuite). This needs the ``libero`` package + ``robosuite`` +
+``mujoco`` installed (see scripts/install_libero_sim.sh). Best run on a workstation with a
+GPU and working offscreen GL (EGL), e.g. your RTX 5090; it can also run headless on a
+cluster node if EGL is available.
+
+Example (local, RTX 5090):
+    MUJOCO_GL=egl python eval/libero/evaluate_libero.py \
+        --config runs/logs/<date>/<exp>/<exp>-config.json \
+        --ckpt   runs/checkpoints/<date>/<exp>/last.ckpt \
+        --task_suite libero_10 \
+        --num_trials_per_task 10 \
+        --execute_step 5 \
+        --save_video \
+        --output_dir runs/libero_eval/<exp>
+"""
+
+from __future__ import annotations
+
+import argparse
+import faulthandler
+import json
+import os
+import sys
+import time
+from collections import defaultdict
+from pathlib import Path
+
+faulthandler.enable()
+
+# Offscreen GL for MuJoCo. EGL is the headless-friendly backend; override with MUJOCO_GL.
+os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("PYOPENGL_PLATFORM", os.environ["MUJOCO_GL"])
+# Reduce CUDA allocator fragmentation across many small inference calls.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import numpy as np
+
+from eval.calvin.video_recorder import FrameRecorder
+from eval.libero.model_wrapper import LFMLiberoModel, load_action_stats
+from models.model_backbone import load_config
+
+# Default max control steps per suite (matches OpenVLA's LIBERO eval budget).
+SUITE_MAX_STEPS = {
+    "libero_spatial": 220,
+    "libero_object": 280,
+    "libero_goal": 300,
+    "libero_10": 520,
+    "libero_90": 400,
+}
+
+# Map our --task_suite arg to the RLDS dataset name used at train time (for stats lookup).
+SUITE_TO_DATASET = {
+    "libero_spatial": "libero_spatial_no_noops",
+    "libero_object": "libero_object_no_noops",
+    "libero_goal": "libero_goal_no_noops",
+    "libero_10": "libero_10_no_noops",
+}
+
+
+def _make_env(task, resolution: int = 256):
+    """Create a LIBERO OffScreenRenderEnv for a given task."""
+    from libero.libero import get_libero_path
+    from libero.libero.envs import OffScreenRenderEnv
+
+    task_bddl = os.path.join(
+        get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
+    )
+    env_args = {
+        "bddl_file_name": task_bddl,
+        "camera_heights": resolution,
+        "camera_widths": resolution,
+    }
+    env = OffScreenRenderEnv(**env_args)
+    env.seed(0)
+    return env
+
+
+def _get_agentview(obs) -> np.ndarray:
+    """Extract the agentview RGB frame from a LIBERO observation dict."""
+    return np.asarray(obs["agentview_image"])
+
+
+def rollout(env, model, task, init_state, out_dir, task_i, ep_i, execute_step,
+            max_steps, save_video, video_fps, num_wait_steps=10):
+    """Run one episode; return (success, num_steps)."""
+    instruction = task.language
+    env.reset()
+    obs = env.set_init_state(init_state)
+    model.reset()
+
+    # LIBERO physics settle: step a few no-op actions before control starts.
+    dummy = np.zeros(7, dtype=np.float32)
+    dummy[6] = -1.0  # keep gripper open while settling
+    for _ in range(num_wait_steps):
+        obs, _, _, _ = env.step(dummy)
+
+    stem = f"task{task_i:02d}-ep{ep_i:02d}"
+    recorder = FrameRecorder(out_dir, stem, fps=video_fps) if save_video else None
+
+    success = False
+    try:
+        for step_i in range(max_steps):
+            frame = _get_agentview(obs)
+            if recorder is not None:
+                # Record the human-viewable frame (rot180 to undo robosuite flip).
+                recorder.add(np.ascontiguousarray(frame[::-1, ::-1]))
+            action = model.step(frame, instruction, execute_step=execute_step)
+            obs, reward, done, info = env.step(action.tolist())
+            if done:
+                success = True
+                if recorder is not None:
+                    recorder.add(np.ascontiguousarray(_get_agentview(obs)[::-1, ::-1]))
+                return True, step_i + 1
+        return False, max_steps
+    finally:
+        stats = model.action_stats()
+        if stats:
+            print(f"    action stats: {stats}", flush=True)
+            if max(stats.get("arm_std_per_dim", [0])) < 1e-3:
+                print("    [WARN] arm action std ~0 — policy may be frozen (not reacting "
+                      "to image).", flush=True)
+        if recorder is not None and recorder.count > 0:
+            tag = "SUCC" if success else "FAIL"
+            video_path = recorder.finalize(tag)
+            if video_path is not None:
+                print(f"    >>> watch rollout: {video_path}", flush=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="LFM4VLA LIBERO closed-loop eval (single GPU)")
+    ap.add_argument("--config", required=True, help="Saved run config JSON (*-config.json)")
+    ap.add_argument("--ckpt", required=True, help=".ckpt file or checkpoint dir")
+    ap.add_argument("--task_suite", default="libero_10",
+                    choices=list(SUITE_TO_DATASET.keys()),
+                    help="LIBERO task suite to evaluate")
+    ap.add_argument("--data_root_dir", default=None,
+                    help="RLDS dir with dataset_statistics*.json (for action denorm). "
+                         "Defaults to the train_dataset.data_root_dir in the config.")
+    ap.add_argument("--num_trials_per_task", type=int, default=10,
+                    help="Init-state episodes per task (LIBERO ships 50).")
+    ap.add_argument("--execute_step", type=int, default=1,
+                    help="Env steps replayed per model query (1 = closed-loop).")
+    ap.add_argument("--max_steps", type=int, default=None,
+                    help="Override per-episode step budget (default: per-suite).")
+    ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--gripper_open_positive", action="store_true",
+                    help="Flip gripper sign if the robot closes when it should open.")
+    ap.add_argument("--image_transform", default="rot180",
+                    choices=["rot180", "flip_vertical", "none"],
+                    help="Geometry applied to agentview before the policy (match training).")
+    ap.add_argument("--save_video", action="store_true", help="Write an MP4 per episode")
+    ap.add_argument("--video_fps", type=int, default=20)
+    ap.add_argument("--output_dir", default="runs/libero_eval")
+    args = ap.parse_args()
+
+    np.random.seed(args.seed)
+
+    configs = load_config(args.config)
+    dataset_name = SUITE_TO_DATASET[args.task_suite]
+    data_root_dir = args.data_root_dir or configs["train_dataset"]["data_root_dir"]
+    action_stats = load_action_stats(data_root_dir, dataset_name)
+    print(f"Loaded action stats from {action_stats['path']}")
+
+    image_size = int(configs.get("train_dataset", {}).get("image_size", 224))
+    max_steps = args.max_steps or SUITE_MAX_STEPS.get(args.task_suite, 520)
+
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Loading LFM policy from {args.ckpt}")
+    model = LFMLiberoModel(
+        args.ckpt,
+        configs,
+        action_stats=action_stats,
+        device=args.device,
+        image_size=image_size,
+        image_transform=args.image_transform,
+        gripper_open_is_negative=not args.gripper_open_positive,
+        norm_min=float(configs.get("norm_min", -1.0)),
+        norm_max=float(configs.get("norm_max", 1.0)),
+    )
+
+    from libero.libero import benchmark
+
+    benchmark_dict = benchmark.get_benchmark_dict()
+    suite = benchmark_dict[args.task_suite]()
+    num_tasks = suite.n_tasks
+    print(f"Task suite '{args.task_suite}': {num_tasks} tasks, "
+          f"{args.num_trials_per_task} episodes each, max_steps={max_steps}")
+
+    per_task = {}
+    results = []
+    t0 = time.time()
+    for task_i in range(num_tasks):
+        task = suite.get_task(task_i)
+        init_states = suite.get_task_init_states(task_i)
+        env = _make_env(task, resolution=256)
+
+        n_success = 0
+        n_ep = min(args.num_trials_per_task, len(init_states))
+        for ep_i in range(n_ep):
+            ok, nsteps = rollout(
+                env, model, task, init_states[ep_i], out_dir, task_i, ep_i,
+                execute_step=args.execute_step, max_steps=max_steps,
+                save_video=args.save_video, video_fps=args.video_fps,
+            )
+            n_success += int(ok)
+            results.append(int(ok))
+            print(f"[task {task_i+1}/{num_tasks} | ep {ep_i+1}/{n_ep}] "
+                  f"'{task.language}' -> {'SUCCESS' if ok else 'fail'} ({nsteps} steps) | "
+                  f"task SR so far: {n_success}/{ep_i+1}", flush=True)
+
+        env.close()
+        per_task[task.language] = {"success": n_success, "total": n_ep,
+                                   "success_rate": n_success / max(n_ep, 1)}
+        print(f"== task {task_i+1} done: {n_success}/{n_ep} "
+              f"({100*n_success/max(n_ep,1):.1f}%) ==", flush=True)
+
+    overall = float(np.mean(results)) if results else 0.0
+    summary = {
+        "task_suite": args.task_suite,
+        "num_tasks": num_tasks,
+        "num_trials_per_task": args.num_trials_per_task,
+        "execute_step": args.execute_step,
+        "max_steps": max_steps,
+        "overall_success_rate": overall,
+        "per_task": per_task,
+        "ckpt": str(args.ckpt),
+        "elapsed_sec": round(time.time() - t0, 1),
+    }
+    with open(out_dir / "results.json", "w") as f:
+        json.dump(summary, f, indent=2)
+
+    print("\n=== LIBERO results ===")
+    for lang, r in per_task.items():
+        print(f"  {r['success']:2d}/{r['total']:2d}  {r['success_rate']*100:5.1f}%  {lang}")
+    print(f"  OVERALL: {overall*100:.1f}%  ({sum(results)}/{len(results)})")
+    print(f"  Saved to {out_dir / 'results.json'}")
+
+
+if __name__ == "__main__":
+    main()

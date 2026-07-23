@@ -28,6 +28,7 @@ conda activate "$CONDA_ENV"
 
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
+export MALLOC_ARENA_MAX=2
 
 # Lightning picks up SLURM GPU layout from srun
 srun python main.py --config "$CONFIG"
