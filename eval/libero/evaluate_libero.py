@@ -6,8 +6,8 @@ watch the policy.
 
 LIBERO is MuJoCo-based (robosuite). This needs the ``libero`` package + ``robosuite`` +
 ``mujoco`` installed (see scripts/install_libero_sim.sh). Best run on a workstation with a
-GPU and working offscreen GL (EGL), e.g. your RTX 5090; on SLURM it auto-falls back to
-OSMesa (CPU) when EGL libs are missing.
+GPU and working offscreen GL (EGL), e.g. your RTX 5090; on SLURM it auto-tries software
+EGL and OSMesa when GPU EGL is unavailable.
 
 Example (local, RTX 5090):
     MUJOCO_GL=egl python eval/libero/evaluate_libero.py \
@@ -100,60 +100,102 @@ def _ensure_libero_config() -> None:
     print(f"Created LIBERO config at {config_file}")
 
 
-def _probe_mujoco_gl(backend: str) -> bool:
-    """Return True if ``import mujoco`` works with the given GL backend."""
+# Headless MuJoCo profiles tried in order when --mujoco_gl=auto.
+# Newer mesalib (>=25.2) removed OSMesa; software EGL usually works instead.
+MUJOCO_GL_PROFILES: tuple[dict[str, str], ...] = (
+    {"name": "egl", "MUJOCO_GL": "egl", "PYOPENGL_PLATFORM": "egl"},
+    {
+        "name": "egl_software",
+        "MUJOCO_GL": "egl",
+        "PYOPENGL_PLATFORM": "egl",
+        "LIBGL_ALWAYS_SOFTWARE": "true",
+    },
+    {
+        "name": "egl_headless",
+        "MUJOCO_GL": "egl",
+        "PYOPENGL_PLATFORM": "egl",
+        "LIBGL_ALWAYS_SOFTWARE": "true",
+        "EGL_PLATFORM": "surfaceless",
+    },
+    {"name": "osmesa", "MUJOCO_GL": "osmesa", "PYOPENGL_PLATFORM": "osmesa"},
+)
+
+
+def _prepend_conda_lib_to_env(env: dict[str, str]) -> None:
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if not conda_prefix:
+        return
+    lib = os.path.join(conda_prefix, "lib")
+    path = env.get("LD_LIBRARY_PATH", "")
+    if lib not in path.split(os.pathsep):
+        env["LD_LIBRARY_PATH"] = lib + (os.pathsep + path if path else "")
+
+
+def _apply_mujoco_gl_profile(profile: dict[str, str]) -> None:
+    _prepend_conda_lib_to_env(os.environ)
+    for key, value in profile.items():
+        if key != "name":
+            os.environ[key] = value
+
+
+def _probe_mujoco_gl(profile: dict[str, str]) -> tuple[bool, str]:
+    """Return (ok, error_text) for importing mujoco under a GL profile."""
     env = os.environ.copy()
-    env["MUJOCO_GL"] = backend
-    env["PYOPENGL_PLATFORM"] = backend
+    _prepend_conda_lib_to_env(env)
+    for key, value in profile.items():
+        if key != "name":
+            env[key] = value
     result = subprocess.run(
         [sys.executable, "-c", "import mujoco"],
         env=env,
         capture_output=True,
+        text=True,
     )
-    return result.returncode == 0
+    if result.returncode == 0:
+        return True, ""
+    err = (result.stderr or result.stdout or "unknown error").strip()
+    return False, err[-1500:]
+
+
+def _profiles_for_request(requested: str) -> list[dict[str, str]]:
+    if requested == "auto":
+        profiles = list(MUJOCO_GL_PROFILES)
+        env_pref = os.environ.get("MUJOCO_GL")
+        if env_pref and env_pref not in ("auto", ""):
+            preferred = [p for p in profiles if p["MUJOCO_GL"] == env_pref]
+            others = [p for p in profiles if p["MUJOCO_GL"] != env_pref]
+            profiles = preferred + others
+        return profiles
+    if requested == "egl":
+        return [p for p in MUJOCO_GL_PROFILES if p["MUJOCO_GL"] == "egl"]
+    if requested == "osmesa":
+        return [p for p in MUJOCO_GL_PROFILES if p["MUJOCO_GL"] == "osmesa"]
+    raise ValueError(f"unsupported --mujoco_gl value: {requested}")
 
 
 def _configure_mujoco_gl(requested: str) -> str:
     """Pick a headless MuJoCo backend before robosuite/mujoco are imported."""
-    if requested not in ("auto", "egl", "osmesa"):
-        raise ValueError(f"unsupported --mujoco_gl value: {requested}")
+    profiles = _profiles_for_request(requested)
+    failures: list[str] = []
 
-    if requested != "auto":
-        os.environ["MUJOCO_GL"] = requested
-        os.environ["PYOPENGL_PLATFORM"] = requested
-        if not _probe_mujoco_gl(requested):
-            raise RuntimeError(
-                f"MuJoCo GL backend '{requested}' is unavailable in this environment.\n"
-                "For EGL (GPU offscreen): conda install -c conda-forge libegl-devel\n"
-                "For OSMesa (CPU offscreen): conda install -c conda-forge mesalib\n"
-                "Or try: --mujoco_gl auto"
-            )
-        print(f"[render] using MuJoCo GL backend: {requested}", flush=True)
-        return requested
+    for profile in profiles:
+        ok, err = _probe_mujoco_gl(profile)
+        if ok:
+            _apply_mujoco_gl_profile(profile)
+            print(f"[render] using MuJoCo GL profile: {profile['name']}", flush=True)
+            return profile["name"]
+        summary = err.splitlines()[-1] if err else "import failed"
+        failures.append(f"  {profile['name']}: {summary}")
 
-    candidates = []
-    env_pref = os.environ.get("MUJOCO_GL")
-    if env_pref and env_pref not in ("auto", ""):
-        candidates.append(env_pref)
-    for backend in ("egl", "osmesa"):
-        if backend not in candidates:
-            candidates.append(backend)
-
-    for backend in candidates:
-        if _probe_mujoco_gl(backend):
-            os.environ["MUJOCO_GL"] = backend
-            os.environ["PYOPENGL_PLATFORM"] = backend
-            print(f"[render] using MuJoCo GL backend: {backend}", flush=True)
-            return backend
-
+    detail = "\n".join(failures)
     raise RuntimeError(
-        "No headless MuJoCo GL backend available (tried: "
-        + ", ".join(candidates)
-        + ").\n"
-        "Install one of:\n"
-        "  conda install -c conda-forge libegl-devel   # GPU EGL (fastest)\n"
-        "  conda install -c conda-forge mesalib      # CPU OSMesa (cluster fallback)\n"
-        "Then re-run with --mujoco_gl auto (default) or --mujoco_gl osmesa."
+        "No headless MuJoCo GL backend available.\n"
+        f"Probe results:\n{detail}\n\n"
+        "Fix (run inside your conda env on a compute node):\n"
+        "  conda install -y -c conda-forge mesalib libegl-devel glew\n"
+        "  export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH\n"
+        "If osmesa still fails on newer mesalib, pin: conda install -c conda-forge 'mesalib<=25.1.0'\n"
+        "Or rely on software EGL (auto mode tries egl_software / egl_headless)."
     )
 
 
@@ -254,7 +296,7 @@ def main():
     ap.add_argument("--output_dir", default="runs/libero_eval")
     ap.add_argument("--mujoco_gl", default=os.environ.get("MUJOCO_GL", "auto"),
                     choices=["auto", "egl", "osmesa"],
-                    help="Headless MuJoCo renderer. 'auto' tries EGL then OSMesa.")
+                    help="Headless MuJoCo renderer. 'auto' tries EGL, software-EGL, OSMesa.")
     args = ap.parse_args()
 
     _configure_mujoco_gl(args.mujoco_gl)

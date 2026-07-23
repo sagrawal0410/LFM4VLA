@@ -19,9 +19,9 @@ set -euo pipefail
 echo "[1/5] Core sim deps (mujoco, robosuite)..."
 pip install "mujoco>=3.1" "robosuite==1.4.1" PyOpenGL PyOpenGL_accelerate
 
-echo "[2/5] Headless rendering fallbacks (EGL + OSMesa for SLURM nodes)..."
+echo "[2/5] Headless rendering (EGL + software-EGL + OSMesa for SLURM nodes)..."
 if command -v conda >/dev/null 2>&1; then
-  conda install -y -c conda-forge mesalib libegl-devel || true
+  conda install -y -c conda-forge mesalib libegl-devel glew || true
 fi
 
 echo "[3/5] LIBERO benchmark (from GitHub)..."

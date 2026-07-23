@@ -29,7 +29,9 @@ conda activate "$CONDA_ENV"
 
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
-# auto = try GPU EGL, fall back to CPU OSMesa (needed on many SLURM nodes).
+# Ensure conda-shipped GL/EGL/OSMesa libs are visible to MuJoCo/PyOpenGL.
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+# auto = try GPU EGL, software EGL, then OSMesa.
 export MUJOCO_GL="${MUJOCO_GL:-auto}"
 # Optional: override ~/.libero/config.yaml location (evaluate_libero.py auto-creates it).
 # export LIBERO_CONFIG_PATH="$HOME/.libero"
