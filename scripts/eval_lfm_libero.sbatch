@@ -32,6 +32,8 @@ export TOKENIZERS_PARALLELISM=false
 # Headless offscreen rendering for MuJoCo (needs EGL on the node).
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYOPENGL_PLATFORM="$MUJOCO_GL"
+# Optional: override ~/.libero/config.yaml location (evaluate_libero.py auto-creates it).
+# export LIBERO_CONFIG_PATH="$HOME/.libero"
 
 EXTRA_ARGS=()
 if [[ -n "$DATA_ROOT_DIR" ]]; then

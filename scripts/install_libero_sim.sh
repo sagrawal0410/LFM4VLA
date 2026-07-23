@@ -29,6 +29,27 @@ pip install "transformers>=4.46" accelerate safetensors
 
 echo "[4/4] Quick import smoke test..."
 python - <<'PY'
+import importlib.util
+import os
+import yaml
+
+# libero.libero calls input() on first import if ~/.libero/config.yaml is missing.
+libero_config_path = os.environ.get("LIBERO_CONFIG_PATH", os.path.expanduser("~/.libero"))
+config_file = os.path.join(libero_config_path, "config.yaml")
+if not os.path.exists(config_file):
+    spec = importlib.util.find_spec("libero.libero")
+    benchmark_root = os.path.dirname(spec.origin)
+    os.makedirs(libero_config_path, exist_ok=True)
+    with open(config_file, "w") as f:
+        yaml.dump({
+            "benchmark_root": benchmark_root,
+            "bddl_files": os.path.join(benchmark_root, "bddl_files"),
+            "init_states": os.path.join(benchmark_root, "init_files"),
+            "datasets": os.path.normpath(os.path.join(benchmark_root, "../datasets")),
+            "assets": os.path.join(benchmark_root, "assets"),
+        }, f)
+    print(f"Created LIBERO config at {config_file}")
+
 import mujoco, robosuite  # noqa: F401
 from libero.libero import benchmark
 d = benchmark.get_benchmark_dict()

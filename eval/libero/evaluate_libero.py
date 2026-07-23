@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import faulthandler
+import importlib.util
 import json
 import os
 import sys
@@ -65,6 +66,40 @@ SUITE_TO_DATASET = {
     "libero_goal": "libero_goal_no_noops",
     "libero_10": "libero_10_no_noops",
 }
+
+
+def _ensure_libero_config() -> None:
+    """Write ~/.libero/config.yaml if missing (LIBERO calls input() otherwise).
+
+    SLURM/Docker jobs have no stdin, so the first import of ``libero.libero`` would
+    raise EOFError without this bootstrap step.
+    """
+    libero_config_path = os.environ.get(
+        "LIBERO_CONFIG_PATH", os.path.expanduser("~/.libero")
+    )
+    config_file = os.path.join(libero_config_path, "config.yaml")
+    if os.path.exists(config_file):
+        return
+
+    spec = importlib.util.find_spec("libero.libero")
+    if spec is None or not spec.origin:
+        raise RuntimeError(
+            "libero package not installed. Run: bash scripts/install_libero_sim.sh"
+        )
+    benchmark_root = os.path.dirname(spec.origin)
+    config = {
+        "benchmark_root": benchmark_root,
+        "bddl_files": os.path.join(benchmark_root, "bddl_files"),
+        "init_states": os.path.join(benchmark_root, "init_files"),
+        "datasets": os.path.normpath(os.path.join(benchmark_root, "../datasets")),
+        "assets": os.path.join(benchmark_root, "assets"),
+    }
+    os.makedirs(libero_config_path, exist_ok=True)
+    import yaml
+
+    with open(config_file, "w") as f:
+        yaml.dump(config, f)
+    print(f"Created LIBERO config at {config_file}")
 
 
 def _make_env(task, resolution: int = 256):
@@ -191,6 +226,7 @@ def main():
         norm_max=float(configs.get("norm_max", 1.0)),
     )
 
+    _ensure_libero_config()
     from libero.libero import benchmark
 
     benchmark_dict = benchmark.get_benchmark_dict()
