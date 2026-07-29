@@ -55,6 +55,7 @@
         "hidden_size": 1024,
         "action_dim": 28,
         "down_sample": "none",
+        "num_action_tokens": 1,
         "latent": 1,
         "fwd_pred_next_n": 1,
         "window_size": 1,

@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
-from einops import rearrange, repeat
+from einops import rearrange
 from PIL import Image
 
 from models.model_backbone import RoboVLMBackbone
@@ -276,15 +276,13 @@ class RoboLFM25VL(RoboVLMBackbone):
 
         action_token_mask = None
         if action_space == "continuous":
-            action_token = self.action_token
             if mode not in ("train", "val"):
-                action_token = action_token.to(dtype=next(self.model.parameters()).dtype)
-            action_tokens = repeat(
-                action_token,
-                "d -> b n d",
-                b=multimodal_embeds.shape[0],
-                n=self.latent_num,
-            )
+                # Keep parameter dtype in sync with the backbone for inference.
+                if self.action_token.dtype != next(self.model.parameters()).dtype:
+                    self.action_token.data = self.action_token.data.to(
+                        dtype=next(self.model.parameters()).dtype
+                    )
+            action_tokens = self._expand_action_tokens(multimodal_embeds.shape[0])
             (
                 multimodal_embeds,
                 multimodal_labels,

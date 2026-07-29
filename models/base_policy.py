@@ -252,10 +252,16 @@ class FCDecoder(BasePolicyHead):
 class FCContinuousDecoder(BasePolicyHead):
     """Fully-continuous action head (no binary gripper split).
 
-    For robots whose entire action vector is continuous joint targets (e.g. the
-    Unitree G1 in Humanoid Everyday: 14 arm + 14 hand joints = 28 dims). Every
-    dim goes through one Tanh head and is trained with Huber loss on targets
-    normalized to [-1, 1]; there is no BCE/gripper branch.
+    Two layers on top of the VLM action-token hidden states:
+      1. ``self.mlp`` — Linear → ReLU → Linear projection over concatenated tokens
+      2. ``self.actions`` — multi-layer ``MLPTanhHead`` predicting all ``action_dim``
+         continuous joints (G1 Humanoid Everyday: 28 = 14 arm + 14 Dex3 hand)
+
+    There is **no** separate gripper / BCE branch. Targets are Huber-supervised
+    after q01/q99 normalization to ``[-1, 1]``.
+
+    ``latent`` / ``n_tokens`` is the number of concatenated action-token features
+    (``num_action_tokens * token_repeat`` from the backbone).
     """
 
     def __init__(
@@ -266,20 +272,30 @@ class FCContinuousDecoder(BasePolicyHead):
         down_sample,
         latent,
         fwd_pred_next_n,
+        n_tokens=None,
         **kwargs,
     ):
+        # Drop robot-specific / layout keys that are not BasePolicyHead args.
+        kwargs.pop("with_history", None)
+        kwargs.pop("history_type", None)
+        kwargs.pop("window_size", None)
+        kwargs.pop("tokenizer", None)
         super().__init__(hidden_size, action_dim, **kwargs)
         self.in_features = in_features
         self.fwd_pred_next_n = fwd_pred_next_n
         self.down_sample = down_sample
-        self.latent = latent
+        self.n_tokens = int(n_tokens if n_tokens is not None else latent)
+        self.latent = self.n_tokens  # kept for logging / legacy reads
         self.action_dim = action_dim
+
+        # Layer 1: project concatenated action-token features.
         self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(in_features * latent, 1024),
+            torch.nn.Linear(in_features * self.n_tokens, 1024),
             torch.nn.ReLU(),
-            torch.nn.Linear(1024, hidden_size * latent),
+            torch.nn.Linear(1024, hidden_size),
         )
-        self.actions = MLPTanhHead(hidden_size * latent, fwd_pred_next_n * action_dim)
+        # Layer 2: continuous joint head (all dims, shared Tanh MLP).
+        self.actions = MLPTanhHead(hidden_size, fwd_pred_next_n * action_dim)
 
         if self.down_sample == "pooling":
             self.pooling = torch.nn.AdaptiveAvgPool1d(1)
@@ -307,6 +323,11 @@ class FCContinuousDecoder(BasePolicyHead):
             tok_seq = self.pooling(tok_seq.permute(0, 2, 1))
             tok_seq = rearrange(tok_seq, "b d n -> b (n d)")
         elif self.down_sample == "none":
+            if n_tok is not None and n_tok != self.n_tokens:
+                raise ValueError(
+                    f"FCContinuousDecoder expected {self.n_tokens} action tokens, "
+                    f"got {n_tok}. Check num_action_tokens * latent."
+                )
             tok_seq = rearrange(tok_seq, "b n d -> b (n d)")
         else:
             raise NotImplementedError(self.down_sample)
@@ -314,15 +335,16 @@ class FCContinuousDecoder(BasePolicyHead):
         tok_seq = self.mlp(tok_seq)
         actions = self.actions(tok_seq)
         if seq_len is not None:
-            actions = rearrange(actions, "(b l) (n d) -> b l n d", b=bs, l=seq_len, n=self.fwd_pred_next_n)
+            actions = rearrange(
+                actions, "(b l) (n d) -> b l n d", b=bs, l=seq_len, n=self.fwd_pred_next_n
+            )
         elif n_tok is not None:
             actions = rearrange(actions, "b (n d) -> b n d", b=bs, n=self.fwd_pred_next_n)
         return actions
 
     def loss(self, pred_action, labels, attention_mask=None):
         """Huber loss over all action dims. ``labels`` is the trainer's
-        (arm_action_chunck, gripper_action_chunck) tuple; the gripper slot is
-        None for non-7-dim actions and is ignored here."""
+        (action_chunck, gripper_chunck) tuple; gripper is None for 28-D actions."""
         if labels is None:
             return {"loss": None}
         target = labels[0] if isinstance(labels, (tuple, list)) else labels
@@ -332,7 +354,9 @@ class FCContinuousDecoder(BasePolicyHead):
         if attention_mask is None:
             action_loss = torch.nn.functional.huber_loss(pred_action, target)
         else:
-            action_loss = torch.nn.functional.huber_loss(pred_action, target, reduction="none")
+            action_loss = torch.nn.functional.huber_loss(
+                pred_action, target, reduction="none"
+            )
             action_loss = action_loss[attention_mask.bool()].mean()
         return {"loss_arm": action_loss}
 

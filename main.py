@@ -8,12 +8,24 @@ def parse_args():
     parser = argparse.ArgumentParser(description="LFM4VLA training")
     parser.add_argument("--config", type=str, required=True, help="Path to JSON config")
     parser.add_argument("--resume", type=str, default=None, help="Lightning checkpoint to resume from")
+    parser.add_argument("--num_action_tokens", type=int, default=None,
+                        help="Override act_head.num_action_tokens (distinct learned queries)")
+    parser.add_argument("--latent", type=int, default=None,
+                        help="Override act_head.latent (per-token repeat factor)")
+    parser.add_argument("--task_name", type=str, default=None,
+                        help="Override top-level task_name (used in run dirs / wandb)")
     return vars(parser.parse_args())
 
 
 def update_configs(configs, args):
     if args.get("resume"):
         configs["resume"] = args["resume"]
+    if args.get("num_action_tokens") is not None:
+        configs.setdefault("act_head", {})["num_action_tokens"] = args["num_action_tokens"]
+    if args.get("latent") is not None:
+        configs.setdefault("act_head", {})["latent"] = args["latent"]
+    if args.get("task_name"):
+        configs["task_name"] = args["task_name"]
     return configs
 
 

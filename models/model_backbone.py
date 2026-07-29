@@ -9,6 +9,34 @@ from torch import nn
 
 from models.vlm_builder import build_vlm
 
+
+def resolve_action_token_layout(act_head_configs: Optional[dict]) -> Tuple[int, int, int]:
+    """Return ``(num_action_tokens, token_repeat, total_tokens)``.
+
+    * ``num_action_tokens`` — distinct learned action-query embeddings.
+    * ``token_repeat`` / ``latent`` — how many times each embedding is repeated
+      when inserted into the VLM sequence.
+    * ``total_tokens`` — ``num_action_tokens * token_repeat`` slots fed to the head.
+
+    Legacy configs only set ``latent`` (token count, no repeat). New Humanoid
+    Everyday configs set both ``num_action_tokens`` and ``latent`` (repeat).
+    """
+    if not act_head_configs:
+        return 1, 1, 1
+    if "num_action_tokens" in act_head_configs:
+        num_tokens = int(act_head_configs["num_action_tokens"])
+        token_repeat = int(act_head_configs.get("latent", 1))
+    else:
+        num_tokens = int(act_head_configs.get("latent", 1))
+        token_repeat = int(act_head_configs.get("token_repeat", 1))
+    if num_tokens < 1 or token_repeat < 1:
+        raise ValueError(
+            f"num_action_tokens ({num_tokens}) and latent/token_repeat "
+            f"({token_repeat}) must be >= 1"
+        )
+    return num_tokens, token_repeat, num_tokens * token_repeat
+
+
 def initialize_params(model):
     with torch.no_grad():
         for m in model.children():
@@ -81,7 +109,12 @@ class RoboVLMBackbone(nn.Module):
             self.action_space = self.act_head_configs.get("action_space", "continuous")
         assert self.action_space == "continuous"
 
-        self.action_token = nn.Parameter(torch.zeros(self.hidden_size))
+        self.num_action_tokens, self.token_repeat, self.latent_num = resolve_action_token_layout(
+            self.act_head_configs
+        )
+        # Distinct learned action queries; each is repeated ``token_repeat`` times
+        # when inserted into the VLM (see ``_expand_action_tokens``).
+        self.action_token = nn.Parameter(torch.zeros(self.num_action_tokens, self.hidden_size))
         self.action_token.requires_grad_(True)
 
         if self.fwd_head_configs is not None:
@@ -278,21 +311,41 @@ class RoboVLMBackbone(nn.Module):
             insert_mask,
         )
     
+    def _expand_action_tokens(self, batch_size: int) -> torch.Tensor:
+        """Build ``[B, num_action_tokens * token_repeat, D]`` action queries."""
+        toks = self.action_token  # [N, D]
+        if self.token_repeat > 1:
+            toks = toks.repeat_interleave(self.token_repeat, dim=0)  # [N*R, D]
+        return toks.unsqueeze(0).expand(batch_size, -1, -1).contiguous()
+
     def _init_heads(self):
         action_head = None
         if self.act_head_configs is not None:
             import models.base_policy as action_heads
 
+            num_tokens, token_repeat, total_tokens = resolve_action_token_layout(
+                self.act_head_configs
+            )
+            self.num_action_tokens = num_tokens
+            self.token_repeat = token_repeat
+            self.latent_num = total_tokens
+
             _kwargs = copy.deepcopy(self.act_head_configs)
             _kwargs.update(
-                dict(  # hidden_size=self.hidden_size,
+                dict(
                     tokenizer=self.tokenizer,
                     in_features=self.hidden_size,
                     fwd_pred_next_n=self.fwd_pred_next_n,
                     window_size=self.window_size,
-                ))
+                    n_tokens=total_tokens,
+                )
+            )
+            # Head Linear width is driven by total concatenated tokens, not the
+            # legacy single ``latent`` multiplier alone.
+            _kwargs["latent"] = total_tokens
+            _kwargs.pop("num_action_tokens", None)
+            _kwargs.pop("token_repeat", None)
             _cls = getattr(action_heads, _kwargs.pop("type"))
-            self.latent_num = self.act_head_configs.get("latent", 1)
             action_head = _cls(**_kwargs)
 
         return action_head, None, None
@@ -491,12 +544,7 @@ class RoboVLMBackbone(nn.Module):
                 insert_idx=0,
             )
 
-        action_tokens = repeat(
-            self.action_token,
-            "d -> b n d",
-            b=multimodal_embeds.shape[0],
-            n=self.latent_num,
-        )
+        action_tokens = self._expand_action_tokens(multimodal_embeds.shape[0])
 
         (
             multimodal_embeds,

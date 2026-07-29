@@ -225,10 +225,14 @@ def _configure_mujoco_gl(requested: str) -> str:
     )
 
 
-def _make_env(task, resolution: int = 256):
-    """Create a LIBERO OffScreenRenderEnv for a given task."""
+def _make_env(task, resolution: int = 256, live_render: bool = False):
+    """Create a LIBERO env for a given task.
+
+    ``live_render=True`` opens an on-screen MuJoCo window (needs a display +
+    ``MUJOCO_GL=glfw``). Policy still reads offscreen ``agentview`` frames.
+    """
     from libero.libero import get_libero_path
-    from libero.libero.envs import OffScreenRenderEnv
+    from libero.libero.envs import ControlEnv, OffScreenRenderEnv
 
     task_bddl = os.path.join(
         get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
@@ -238,7 +242,17 @@ def _make_env(task, resolution: int = 256):
         "camera_heights": resolution,
         "camera_widths": resolution,
     }
-    env = OffScreenRenderEnv(**env_args)
+    if live_render:
+        # ControlEnv defaults: has_renderer=False, has_offscreen_renderer=True.
+        # Turn on the window while keeping offscreen cameras for the policy.
+        env = ControlEnv(
+            has_renderer=True,
+            has_offscreen_renderer=True,
+            render_camera="agentview",
+            **env_args,
+        )
+    else:
+        env = OffScreenRenderEnv(**env_args)
     env.seed(0)
     return env
 
@@ -249,7 +263,7 @@ def _get_agentview(obs) -> np.ndarray:
 
 
 def rollout(env, model, task, init_state, out_dir, task_i, ep_i, execute_step,
-            max_steps, save_video, video_fps, num_wait_steps=10):
+            max_steps, save_video, video_fps, num_wait_steps=10, live_render=False):
     """Run one episode; return (success, num_steps)."""
     instruction = task.language
     env.reset()
@@ -261,6 +275,8 @@ def rollout(env, model, task, init_state, out_dir, task_i, ep_i, execute_step,
     dummy[6] = -1.0  # keep gripper open while settling
     for _ in range(num_wait_steps):
         obs, _, _, _ = env.step(dummy)
+        if live_render:
+            env.env.render()
 
     stem = f"task{task_i:02d}-ep{ep_i:02d}"
     recorder = FrameRecorder(out_dir, stem, fps=video_fps) if save_video else None
@@ -274,6 +290,8 @@ def rollout(env, model, task, init_state, out_dir, task_i, ep_i, execute_step,
                 recorder.add(np.ascontiguousarray(frame[::-1, ::-1]))
             action = model.step(frame, instruction, execute_step=execute_step)
             obs, reward, done, info = env.step(action.tolist())
+            if live_render:
+                env.env.render()
             if done:
                 success = True
                 if recorder is not None:
@@ -318,14 +336,27 @@ def main():
                     choices=["rot180", "flip_vertical", "none"],
                     help="Geometry applied to agentview before the policy (match training).")
     ap.add_argument("--save_video", action="store_true", help="Write an MP4 per episode")
+    ap.add_argument("--live_render", action="store_true",
+                    help="Open an on-screen MuJoCo window (use MUJOCO_GL=glfw).")
     ap.add_argument("--video_fps", type=int, default=20)
     ap.add_argument("--output_dir", default="runs/libero_eval")
     ap.add_argument("--mujoco_gl", default=os.environ.get("MUJOCO_GL", "auto"),
-                    choices=["auto", "egl", "osmesa"],
-                    help="Headless MuJoCo renderer. 'auto' tries EGL, software-EGL, OSMesa.")
+                    choices=["auto", "egl", "osmesa", "glfw"],
+                    help="MuJoCo renderer. Use glfw for --live_render on a desktop.")
     args = ap.parse_args()
 
-    _configure_mujoco_gl(args.mujoco_gl)
+    if args.live_render and args.mujoco_gl in ("auto", "egl", "osmesa"):
+        # On-screen window needs GLFW; override auto/egl defaults.
+        os.environ["MUJOCO_GL"] = "glfw"
+        args.mujoco_gl = "glfw"
+        print("[render] --live_render set; forcing MUJOCO_GL=glfw", flush=True)
+
+    if args.mujoco_gl == "glfw":
+        os.environ["MUJOCO_GL"] = "glfw"
+        os.environ.pop("PYOPENGL_PLATFORM", None)
+        print("[render] using MuJoCo GL profile: glfw", flush=True)
+    else:
+        _configure_mujoco_gl(args.mujoco_gl)
     np.random.seed(args.seed)
 
     configs = load_config(args.config)
@@ -368,7 +399,7 @@ def main():
     for task_i in range(num_tasks):
         task = suite.get_task(task_i)
         init_states = suite.get_task_init_states(task_i)
-        env = _make_env(task, resolution=256)
+        env = _make_env(task, resolution=256, live_render=args.live_render)
 
         n_success = 0
         n_ep = min(args.num_trials_per_task, len(init_states))
@@ -377,6 +408,7 @@ def main():
                 env, model, task, init_states[ep_i], out_dir, task_i, ep_i,
                 execute_step=args.execute_step, max_steps=max_steps,
                 save_video=args.save_video, video_fps=args.video_fps,
+                live_render=args.live_render,
             )
             n_success += int(ok)
             results.append(int(ok))

@@ -17,7 +17,9 @@
 set -euo pipefail
 
 echo "[1/5] Core sim deps (mujoco, robosuite)..."
-pip install "mujoco>=3.1" "robosuite==1.4.1" PyOpenGL PyOpenGL_accelerate
+# mujoco>=3.10 changed mj_fullM's signature and breaks robosuite 1.4.x controllers.
+# 3.3.2 is the LIBERO-community pin (matches training-time rendering appearance).
+pip install "mujoco==3.3.2" "robosuite==1.4.1" PyOpenGL PyOpenGL_accelerate
 
 echo "[2/5] Headless rendering (EGL + software-EGL + OSMesa for SLURM nodes)..."
 if command -v conda >/dev/null 2>&1; then
