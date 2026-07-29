@@ -6,7 +6,6 @@
 #SBATCH --cpus-per-gpu=8
 #SBATCH --output=output_calvin_eval_%j.out
 #SBATCH --error=output_calvin_eval_%j.err
-#SBATCH --account=liquidai
 
 set -euo pipefail
 

@@ -24,9 +24,22 @@ if command -v conda >/dev/null 2>&1; then
   conda install -y -c conda-forge mesalib libegl-devel glew || true
 fi
 
-echo "[3/5] LIBERO benchmark (from GitHub)..."
-# LIBERO is not on PyPI; install from source. Pin to a commit if you need reproducibility.
-pip install "git+https://github.com/Lifelong-Robot-Learning/LIBERO.git"
+echo "[3/5] LIBERO benchmark (clone + editable install)..."
+# pip install git+https://... builds an empty ~5KB wheel (missing libero/__init__.py upstream).
+# Clone, patch packaging, and editable-install so assets stay on disk.
+LIBERO_SRC="${LIBERO_SRC:-${HOME}/.local/src/LIBERO}"
+mkdir -p "$(dirname "$LIBERO_SRC")"
+if [[ ! -d "$LIBERO_SRC/.git" ]]; then
+  git clone --depth 1 https://github.com/Lifelong-Robot-Learning/LIBERO.git "$LIBERO_SRC"
+else
+  git -C "$LIBERO_SRC" pull --ff-only 2>/dev/null || true
+fi
+# Without this file, setuptools find_packages() skips the whole tree.
+touch "$LIBERO_SRC/libero/__init__.py"
+pip uninstall -y libero 2>/dev/null || true
+pip install -e "$LIBERO_SRC" --no-cache-dir --config-settings editable_mode=compat 2>/dev/null \
+  || pip install -e "$LIBERO_SRC" --no-cache-dir
+pip install "bddl==1.0.1"
 
 echo "[4/5] Video + model runtime deps..."
 pip install imageio imageio-ffmpeg opencv-python-headless pillow einops
@@ -61,6 +74,16 @@ d = benchmark.get_benchmark_dict()
 suite = d["libero_10"]()
 print(f"OK: libero_10 has {suite.n_tasks} tasks; robosuite + mujoco import fine.")
 PY
+
+if ! python - <<'PY'
+from libero.libero import benchmark
+print("libero package:", benchmark.__file__)
+PY
+then
+  echo "[ERROR] LIBERO import failed. Do NOT run: pip install libero"
+  echo "        Re-run: bash scripts/install_libero_sim.sh"
+  exit 1
+fi
 
 cat <<'EOF'
 
