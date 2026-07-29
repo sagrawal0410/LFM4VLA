@@ -42,6 +42,32 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+
+def _patch_torch_load_for_libero() -> None:
+    """PyTorch >=2.6 defaults ``torch.load(..., weights_only=True)``.
+
+    LIBERO's ``*.pruned_init`` files are trusted numpy pickles shipped with the
+    benchmark; loading them under the new default raises UnpicklingError.
+    Must run before ``suite.get_task_init_states``.
+    """
+    import torch
+
+    if getattr(torch.load, "_lfm_libero_patched", False):
+        return
+    _orig = torch.load
+
+    def _load(*args, **kwargs):
+        # Force False even if a caller omits the kwarg (PyTorch 2.6+ default is True).
+        kwargs["weights_only"] = False
+        return _orig(*args, **kwargs)
+
+    _load._lfm_libero_patched = True  # type: ignore[attr-defined]
+    torch.load = _load  # type: ignore[assignment]
+
+
+# Apply ASAP: model load + LIBERO init-state load both go through torch.load.
+_patch_torch_load_for_libero()
+
 import numpy as np
 
 from eval.calvin.video_recorder import FrameRecorder
@@ -199,26 +225,6 @@ def _configure_mujoco_gl(requested: str) -> str:
     )
 
 
-def _patch_torch_load_for_libero() -> None:
-    """PyTorch >=2.6 defaults ``torch.load(..., weights_only=True)``.
-
-    LIBERO's ``*.pruned_init`` files are trusted numpy pickles shipped with the
-    benchmark; loading them under the new default raises UnpicklingError.
-    """
-    import torch
-
-    if getattr(torch.load, "_lfm_libero_patched", False):
-        return
-    _orig = torch.load
-
-    def _load(*args, **kwargs):
-        kwargs.setdefault("weights_only", False)
-        return _orig(*args, **kwargs)
-
-    _load._lfm_libero_patched = True  # type: ignore[attr-defined]
-    torch.load = _load  # type: ignore[assignment]
-
-
 def _make_env(task, resolution: int = 256):
     """Create a LIBERO OffScreenRenderEnv for a given task."""
     from libero.libero import get_libero_path
@@ -348,7 +354,6 @@ def main():
     )
 
     _ensure_libero_config()
-    _patch_torch_load_for_libero()
     from libero.libero import benchmark
 
     benchmark_dict = benchmark.get_benchmark_dict()
