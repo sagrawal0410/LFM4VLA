@@ -199,6 +199,26 @@ def _configure_mujoco_gl(requested: str) -> str:
     )
 
 
+def _patch_torch_load_for_libero() -> None:
+    """PyTorch >=2.6 defaults ``torch.load(..., weights_only=True)``.
+
+    LIBERO's ``*.pruned_init`` files are trusted numpy pickles shipped with the
+    benchmark; loading them under the new default raises UnpicklingError.
+    """
+    import torch
+
+    if getattr(torch.load, "_lfm_libero_patched", False):
+        return
+    _orig = torch.load
+
+    def _load(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return _orig(*args, **kwargs)
+
+    _load._lfm_libero_patched = True  # type: ignore[attr-defined]
+    torch.load = _load  # type: ignore[assignment]
+
+
 def _make_env(task, resolution: int = 256):
     """Create a LIBERO OffScreenRenderEnv for a given task."""
     from libero.libero import get_libero_path
@@ -328,6 +348,7 @@ def main():
     )
 
     _ensure_libero_config()
+    _patch_torch_load_for_libero()
     from libero.libero import benchmark
 
     benchmark_dict = benchmark.get_benchmark_dict()
