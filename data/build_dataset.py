@@ -1,4 +1,4 @@
-"""Build CALVIN / LIBERO datasets wired to the LFM policy preprocessing."""
+"""Build CALVIN / LIBERO / Humanoid Everyday datasets wired to the LFM policy preprocessing."""
 
 from __future__ import annotations
 
@@ -47,6 +47,14 @@ def build_dataset(dataset_cfg: Dict[str, Any], variant: Dict[str, Any], policy_m
     if dataset_type == "LiberoRLDSDataset":
         data_root_dir = _resolve_path(cfg.pop("data_root_dir"), variant)
         return data.LiberoRLDSDataset(
+            data_root_dir=data_root_dir,
+            **common,
+            **cfg,
+        )
+
+    if dataset_type == "HumanoidEverydayDataset":
+        data_root_dir = _resolve_path(cfg.pop("data_root_dir"), variant)
+        return data.HumanoidEverydayDataset(
             data_root_dir=data_root_dir,
             **common,
             **cfg,

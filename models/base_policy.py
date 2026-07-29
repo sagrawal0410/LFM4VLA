@@ -249,6 +249,94 @@ class FCDecoder(BasePolicyHead):
         return actions, gripper
 
 
+class FCContinuousDecoder(BasePolicyHead):
+    """Fully-continuous action head (no binary gripper split).
+
+    For robots whose entire action vector is continuous joint targets (e.g. the
+    Unitree G1 in Humanoid Everyday: 14 arm + 14 hand joints = 28 dims). Every
+    dim goes through one Tanh head and is trained with Huber loss on targets
+    normalized to [-1, 1]; there is no BCE/gripper branch.
+    """
+
+    def __init__(
+        self,
+        in_features,
+        hidden_size,
+        action_dim,
+        down_sample,
+        latent,
+        fwd_pred_next_n,
+        **kwargs,
+    ):
+        super().__init__(hidden_size, action_dim, **kwargs)
+        self.in_features = in_features
+        self.fwd_pred_next_n = fwd_pred_next_n
+        self.down_sample = down_sample
+        self.latent = latent
+        self.action_dim = action_dim
+        self.mlp = torch.nn.Sequential(
+            torch.nn.Linear(in_features * latent, 1024),
+            torch.nn.ReLU(),
+            torch.nn.Linear(1024, hidden_size * latent),
+        )
+        self.actions = MLPTanhHead(hidden_size * latent, fwd_pred_next_n * action_dim)
+
+        if self.down_sample == "pooling":
+            self.pooling = torch.nn.AdaptiveAvgPool1d(1)
+        elif self.down_sample in ("resampler", "none"):
+            pass
+        else:
+            raise NotImplementedError(self.down_sample)
+        initialize_param(self)
+
+    def forward(self, tok_seq, **kwargs):
+        if len(tok_seq.shape) == 4:
+            bs, seq_len, n_tok, tok_dim = tok_seq.shape
+            tok_seq = rearrange(tok_seq, "b l n d-> (b l) n d")
+        elif tok_seq.dim() == 3:
+            bs, n_tok, tok_dim = tok_seq.shape
+            seq_len = None
+        else:
+            assert len(tok_seq.shape) == 2
+            bs, tok_dim = tok_seq.shape
+            seq_len = None
+            n_tok = None
+            tok_seq = tok_seq.unsqueeze(1)
+
+        if self.down_sample == "pooling":
+            tok_seq = self.pooling(tok_seq.permute(0, 2, 1))
+            tok_seq = rearrange(tok_seq, "b d n -> b (n d)")
+        elif self.down_sample == "none":
+            tok_seq = rearrange(tok_seq, "b n d -> b (n d)")
+        else:
+            raise NotImplementedError(self.down_sample)
+
+        tok_seq = self.mlp(tok_seq)
+        actions = self.actions(tok_seq)
+        if seq_len is not None:
+            actions = rearrange(actions, "(b l) (n d) -> b l n d", b=bs, l=seq_len, n=self.fwd_pred_next_n)
+        elif n_tok is not None:
+            actions = rearrange(actions, "b (n d) -> b n d", b=bs, n=self.fwd_pred_next_n)
+        return actions
+
+    def loss(self, pred_action, labels, attention_mask=None):
+        """Huber loss over all action dims. ``labels`` is the trainer's
+        (arm_action_chunck, gripper_action_chunck) tuple; the gripper slot is
+        None for non-7-dim actions and is ignored here."""
+        if labels is None:
+            return {"loss": None}
+        target = labels[0] if isinstance(labels, (tuple, list)) else labels
+        if target is None:
+            return {"loss": None}
+
+        if attention_mask is None:
+            action_loss = torch.nn.functional.huber_loss(pred_action, target)
+        else:
+            action_loss = torch.nn.functional.huber_loss(pred_action, target, reduction="none")
+            action_loss = action_loss[attention_mask.bool()].mean()
+        return {"loss_arm": action_loss}
+
+
 class FCDecoderDualArm(BasePolicyHead):
     def __init__(
         self,

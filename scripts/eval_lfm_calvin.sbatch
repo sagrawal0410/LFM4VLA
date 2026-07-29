@@ -11,7 +11,7 @@ set -euo pipefail
 
 # --- edit for your run ---
 LFM4VLA_ROOT="${LFM4VLA_ROOT:-$HOME/LFM4VLA}"
-CONDA_ENV="${CONDA_ENV:-lfm4vla}"
+CONDA_ENV="${CONDA_ENV:-calvin_eval}"
 CALVIN_ROOT="${CALVIN_ROOT:-$HOME/calvin}"
 DATASET_PATH="${DATASET_PATH:-/lambdafs/datasets/lfm4vla_calvin/calvin/dataset/task_ABC_D}"
 

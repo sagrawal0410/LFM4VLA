@@ -48,7 +48,7 @@ class BaseTrainer(pl.LightningModule):
 
     def _parse_dataset_name(self, dataset_config):
         dataset_path = dataset_config["data_dir"]
-        for name in ("calvin", "bridge", "libero"):
+        for name in ("calvin", "bridge", "libero", "humanoid"):
             if name in dataset_path.lower():
                 return name
         return "UNKNOWN_DATA"
