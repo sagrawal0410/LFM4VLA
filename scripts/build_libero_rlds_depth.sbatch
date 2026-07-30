@@ -39,8 +39,13 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV_SIM"
 
 export PYTHONUNBUFFERED=1
-# Default auto: software EGL → OSMesa → GPU EGL (bare GPU EGL often fails on SLURM).
-export MUJOCO_GL="${MUJOCO_GL:-auto}"
+# "auto" is our probe mode (utils/mujoco_gl.py), NOT a valid MuJoCo value.
+# Do not export MUJOCO_GL=auto — mujoco rejects it on import. Pass via --mujoco_gl.
+MUJOCO_GL_MODE="${MUJOCO_GL:-auto}"
+# Clear invalid leftover from prior jobs / interactive shells.
+if [[ "${MUJOCO_GL:-}" == "auto" ]]; then
+  unset MUJOCO_GL
+fi
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
 # Help mesa software paths find DRI drivers.
 export LIBGL_DRIVERS_PATH="${LIBGL_DRIVERS_PATH:-${CONDA_PREFIX}/lib/dri}"
@@ -50,7 +55,7 @@ echo "job=${SLURM_JOB_ID:-local}"
 echo "RAW_DIR=$RAW_DIR"
 echo "HDF5_DEPTH_DIR=$HDF5_DEPTH_DIR"
 echo "RLDS_OUT=$RLDS_OUT"
-echo "MUJOCO_GL=$MUJOCO_GL CONDA_PREFIX=$CONDA_PREFIX"
+echo "MUJOCO_GL_MODE=$MUJOCO_GL_MODE CONDA_PREFIX=$CONDA_PREFIX"
 
 # Headless GL libs (safe no-op if already installed).
 conda install -y -c conda-forge "mesalib<=25.1.0" libegl-devel glew || true
@@ -59,18 +64,20 @@ export LIBGL_DRIVERS_PATH="${CONDA_PREFIX}/lib/dri:${LIBGL_DRIVERS_PATH:-}"
 
 # robosuite 1.4.x breaks on mujoco>=3.1.0 (mj_fullM signature change).
 # Pin to the LIBERO-community versions used by scripts/install_libero_sim.sh.
+# Use importlib.metadata (not import mujoco) so we never hit MUJOCO_GL validation.
 python - <<'PY'
 import importlib.metadata as m
-try:
-    v = m.version("mujoco")
-except m.PackageNotFoundError:
-    v = None
-print(f"mujoco version before pin: {v}")
+def ver(pkg):
+    try:
+        return m.version(pkg)
+    except m.PackageNotFoundError:
+        return None
+print(f"mujoco version before pin: {ver('mujoco')}")
 PY
 pip install -q "mujoco==3.3.2" "robosuite==1.4.1"
 python - <<'PY'
-import mujoco, robosuite
-print(f"mujoco={mujoco.__version__} robosuite={robosuite.__version__}")
+import importlib.metadata as m
+print(f"mujoco={m.version('mujoco')} robosuite={m.version('robosuite')}")
 PY
 
 # ---------------------------------------------------------------------------
@@ -112,11 +119,11 @@ fi
 # ---------------------------------------------------------------------------
 if [[ -z "$(ls -A "$HDF5_DEPTH_DIR"/*.hdf5 2>/dev/null || true)" ]]; then
   echo "[2/3] Regenerating HDF5 with agentview_depth → $HDF5_DEPTH_DIR"
-  srun python scripts/regenerate_libero_hdf5_with_depth.py \
+  srun env -u MUJOCO_GL python scripts/regenerate_libero_hdf5_with_depth.py \
     --libero_task_suite "$SUITE" \
     --libero_raw_data_dir "$RAW_DIR/$SUITE" \
     --libero_target_dir "$HDF5_DEPTH_DIR" \
-    --mujoco_gl "$MUJOCO_GL"
+    --mujoco_gl "$MUJOCO_GL_MODE"
 else
   echo "[2/3] Depth HDF5 already present: $HDF5_DEPTH_DIR — skip regenerate"
 fi
