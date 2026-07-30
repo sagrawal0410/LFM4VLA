@@ -37,7 +37,7 @@ class MemoryMonitor(Callback):
     def __init__(self, every_n_steps: int = 50):
         self.every_n_steps = every_n_steps
 
-    def _report(self, trainer, pl_module, where: str):
+    def _report(self, trainer, pl_module, where: str, *, on_step: bool, on_epoch: bool):
         rss = _process_rss_gib()
         cg = _cgroup_memory_gib()
         parts = []
@@ -52,14 +52,26 @@ class MemoryMonitor(Callback):
             return
         print(f"[mem] step={trainer.global_step} {where} " + " ".join(parts), flush=True)
         if trainer.logger is not None:
-            pl_module.log_dict(metrics, on_step=True, on_epoch=False, rank_zero_only=True)
+            # Lightning forbids on_step=True inside epoch-end hooks (e.g. val).
+            pl_module.log_dict(
+                metrics, on_step=on_step, on_epoch=on_epoch, rank_zero_only=True
+            )
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         if trainer.global_step % self.every_n_steps == 0:
-            self._report(trainer, pl_module, "train")
+            self._report(trainer, pl_module, "train", on_step=True, on_epoch=False)
 
     def on_validation_epoch_end(self, trainer, pl_module):
-        self._report(trainer, pl_module, "val_end")
+        self._report(trainer, pl_module, "val_end", on_step=False, on_epoch=True)
 
     def on_train_start(self, trainer, pl_module):
-        self._report(trainer, pl_module, "train_start")
+        # train_start is outside the step/epoch logging matrix; print only.
+        rss = _process_rss_gib()
+        cg = _cgroup_memory_gib()
+        parts = []
+        if rss is not None:
+            parts.append(f"rss={rss:.1f}GiB")
+        if cg is not None:
+            parts.append(f"cgroup={cg:.1f}GiB")
+        if parts:
+            print(f"[mem] step={trainer.global_step} train_start " + " ".join(parts), flush=True)
