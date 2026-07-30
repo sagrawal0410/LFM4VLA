@@ -8,33 +8,11 @@ import torch
 from torch import nn
 
 from models.vlm_builder import build_vlm
-
-
-def resolve_action_token_layout(act_head_configs: Optional[dict]) -> Tuple[int, int, int]:
-    """Return ``(num_action_tokens, token_repeat, total_tokens)``.
-
-    * ``num_action_tokens`` — distinct learned action-query embeddings.
-    * ``token_repeat`` / ``latent`` — how many times each embedding is repeated
-      when inserted into the VLM sequence.
-    * ``total_tokens`` — ``num_action_tokens * token_repeat`` slots fed to the head.
-
-    Legacy configs only set ``latent`` (token count, no repeat). New Humanoid
-    Everyday configs set both ``num_action_tokens`` and ``latent`` (repeat).
-    """
-    if not act_head_configs:
-        return 1, 1, 1
-    if "num_action_tokens" in act_head_configs:
-        num_tokens = int(act_head_configs["num_action_tokens"])
-        token_repeat = int(act_head_configs.get("latent", 1))
-    else:
-        num_tokens = int(act_head_configs.get("latent", 1))
-        token_repeat = int(act_head_configs.get("token_repeat", 1))
-    if num_tokens < 1 or token_repeat < 1:
-        raise ValueError(
-            f"num_action_tokens ({num_tokens}) and latent/token_repeat "
-            f"({token_repeat}) must be >= 1"
-        )
-    return num_tokens, token_repeat, num_tokens * token_repeat
+from models.action_token_layout import (
+    expand_action_tokens,
+    resolve_action_token_layout,
+    uses_he_action_layout,
+)
 
 
 def initialize_params(model):
@@ -109,12 +87,25 @@ class RoboVLMBackbone(nn.Module):
             self.action_space = self.act_head_configs.get("action_space", "continuous")
         assert self.action_space == "continuous"
 
-        self.num_action_tokens, self.token_repeat, self.latent_num = resolve_action_token_layout(
-            self.act_head_configs
-        )
-        # Distinct learned action queries; each is repeated ``token_repeat`` times
-        # when inserted into the VLM (see ``_expand_action_tokens``).
-        self.action_token = nn.Parameter(torch.zeros(self.num_action_tokens, self.hidden_size))
+        # Default LIBERO/CALVIN: one learned embedding [D], repeated ``latent`` times.
+        # HE / FCContinuousDecoder may opt into multi-token layout via
+        # ``models.action_token_layout`` (explicit ``num_action_tokens``).
+        self._use_he_action_layout = uses_he_action_layout(self.act_head_configs)
+        if self._use_he_action_layout:
+            self.num_action_tokens, self.token_repeat, self.latent_num = (
+                resolve_action_token_layout(self.act_head_configs)
+            )
+            if self.num_action_tokens == 1:
+                self.action_token = nn.Parameter(torch.zeros(self.hidden_size))
+            else:
+                self.action_token = nn.Parameter(
+                    torch.zeros(self.num_action_tokens, self.hidden_size)
+                )
+        else:
+            self.num_action_tokens = 1
+            self.token_repeat = 1
+            self.latent_num = int(self.act_head_configs.get("latent", 1)) if self.act_head_configs else 1
+            self.action_token = nn.Parameter(torch.zeros(self.hidden_size))
         self.action_token.requires_grad_(True)
 
         if self.fwd_head_configs is not None:
@@ -312,24 +303,31 @@ class RoboVLMBackbone(nn.Module):
         )
     
     def _expand_action_tokens(self, batch_size: int) -> torch.Tensor:
-        """Build ``[B, num_action_tokens * token_repeat, D]`` action queries."""
-        toks = self.action_token  # [N, D]
-        if self.token_repeat > 1:
-            toks = toks.repeat_interleave(self.token_repeat, dim=0)  # [N*R, D]
-        return toks.unsqueeze(0).expand(batch_size, -1, -1).contiguous()
+        """Insert action queries: legacy repeat for LIBERO/CALVIN, HE helper otherwise."""
+        if self._use_he_action_layout:
+            return expand_action_tokens(
+                self.action_token, batch_size, token_repeat=self.token_repeat
+            )
+        # Legacy: single [D] Parameter repeated ``latent_num`` times.
+        return repeat(self.action_token, "d -> b n d", b=batch_size, n=self.latent_num)
+
+    def _resolve_action_head_cls(self, head_type: str):
+        import models.base_policy as base_policy
+
+        if hasattr(base_policy, head_type):
+            return getattr(base_policy, head_type)
+        import models.continuous_policy as continuous_policy
+
+        if hasattr(continuous_policy, head_type):
+            return getattr(continuous_policy, head_type)
+        raise AttributeError(
+            f"Unknown act_head type '{head_type}'. "
+            "Expected a class in models.base_policy or models.continuous_policy."
+        )
 
     def _init_heads(self):
         action_head = None
         if self.act_head_configs is not None:
-            import models.base_policy as action_heads
-
-            num_tokens, token_repeat, total_tokens = resolve_action_token_layout(
-                self.act_head_configs
-            )
-            self.num_action_tokens = num_tokens
-            self.token_repeat = token_repeat
-            self.latent_num = total_tokens
-
             _kwargs = copy.deepcopy(self.act_head_configs)
             _kwargs.update(
                 dict(
@@ -337,15 +335,24 @@ class RoboVLMBackbone(nn.Module):
                     in_features=self.hidden_size,
                     fwd_pred_next_n=self.fwd_pred_next_n,
                     window_size=self.window_size,
-                    n_tokens=total_tokens,
                 )
             )
-            # Head Linear width is driven by total concatenated tokens, not the
-            # legacy single ``latent`` multiplier alone.
-            _kwargs["latent"] = total_tokens
-            _kwargs.pop("num_action_tokens", None)
-            _kwargs.pop("token_repeat", None)
-            _cls = getattr(action_heads, _kwargs.pop("type"))
+            if uses_he_action_layout(self.act_head_configs):
+                num_tokens, token_repeat, total_tokens = resolve_action_token_layout(
+                    self.act_head_configs
+                )
+                self.num_action_tokens = num_tokens
+                self.token_repeat = token_repeat
+                self.latent_num = total_tokens
+                _kwargs["n_tokens"] = total_tokens
+                _kwargs["latent"] = total_tokens
+                _kwargs.pop("num_action_tokens", None)
+                _kwargs.pop("token_repeat", None)
+            else:
+                # Legacy LIBERO/CALVIN: head ``latent`` stays the config value.
+                self.latent_num = int(self.act_head_configs.get("latent", 1))
+            head_type = _kwargs.pop("type")
+            _cls = self._resolve_action_head_cls(head_type)
             action_head = _cls(**_kwargs)
 
         return action_head, None, None
