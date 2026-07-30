@@ -7,6 +7,10 @@ Sweeps:
 
 → 7 × 5 = 35 runs. Total action tokens inserted = num_action_tokens * latent.
 
+Same grid is reused for the RGB-only and depth+Q-Former sweeps:
+  sbatch scripts/train_lfm_he_token_sweep.sbatch            # RGB
+  sbatch scripts/train_lfm_he_depth_token_sweep.sbatch      # depth, q_former=32
+
 Usage:
   # Print the grid (index -> tokens, latent, total)
   python scripts/sweep_he_tokens.py --list

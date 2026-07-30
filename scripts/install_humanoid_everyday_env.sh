@@ -91,12 +91,19 @@ Done. Activate with:
 
 Next:
   1) Download the 4-skill G1 subset (if not already):
+       # RGB-only
        python scripts/download_humanoid_everyday.py \\
          --output_dir /home/teams/research/robotics/humanoid_everyday
+       # RGB + egocentric depth (separate tree; large parquets)
+       python scripts/download_humanoid_everyday.py \\
+         --output_dir /home/teams/research/robotics/humanoid_everyday_depth \\
+         --include_depth
+       # or: sbatch scripts/download_humanoid_everyday_depth.sbatch
 
   2) Train / sweep (sbatch defaults CONDA_ENV=${ENV_NAME}):
        sbatch scripts/train_lfm_he_450m.sbatch
        sbatch scripts/train_lfm_he_token_sweep.sbatch
+       sbatch scripts/train_lfm_he_depth_token_sweep.sbatch   # depth Q-Former q=32
 
 Leave env '${CLONE_FROM}' alone for NumPy-2 / other experiments.
 EOF

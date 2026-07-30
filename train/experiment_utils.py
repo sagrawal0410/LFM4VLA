@@ -24,6 +24,7 @@ def _build_exp_name(variant: Dict[str, Any]) -> str:
         f"lr{variant.get('learning_rate', 0)}",
         f"ws{variant.get('window_size', 1)}",
         f"{act.get('type', 'head')}",
+        f"tok{act.get('num_action_tokens', 1)}",
         f"lat{act.get('latent', 1)}",
     ]
     setup = variant.get("train_setup", {})

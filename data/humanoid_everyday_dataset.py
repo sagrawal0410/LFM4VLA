@@ -11,8 +11,14 @@ Expected on-disk layout (created by ``scripts/download_humanoid_everyday.py``):
       meta/info.json
       meta/tasks.jsonl               # task_index -> "Category/task_name"
       meta/episodes.jsonl            # episode_index -> tasks, length, robot_type, instruction
-      data/chunk-XXX/episode_XXXXXX.parquet    # slim parquet (action + indices)
+      data/chunk-XXX/episode_XXXXXX.parquet    # slim (+ optional depth) parquet
       videos/chunk-XXX/egocentric/episode_XXXXXX.mp4
+
+Optional depth (``--include_depth`` download into a separate tree, e.g.
+``humanoid_everyday_depth``): parquet column ``observation.depth.egocentric``
+``[H, W]`` float32, aligned with the egocentric RGB video. When
+``load_depth=True``, each sample also returns ``depth`` as ``[W, 1, H, W]`` in
+``[0, 1]`` (same contract as ``LiberoRLDSDataset``).
 
 Actions are absolute joint targets; every dim is normalized to [norm_min, norm_max]
 with q01/q99 bounds computed over the selected episodes (same idea as the RLDS
@@ -31,12 +37,17 @@ import json
 import os
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import Dataset
+
+# LeRobot HF schema column for egocentric depth (kept when downloading with
+# ``--include_depth``).
+DEPTH_COLUMN = "observation.depth.egocentric"
 
 # Task-name keywords defining each skill bucket (matched against the lowercase
 # "Category/task_name" string from meta/tasks.jsonl).
@@ -88,6 +99,8 @@ class HumanoidEverydayDataset(Dataset):
         norm_max: float = 1.0,
         data_source: str = "humanoid_everyday_action",
         max_open_videos: int = 8,
+        load_depth: bool = False,
+        depth_image_size: Optional[int] = None,
         **kwargs: Any,
     ) -> None:
         del tokenizer, norm_action, kwargs
@@ -105,6 +118,9 @@ class HumanoidEverydayDataset(Dataset):
         self.norm_max = float(norm_max)
         self.data_source = data_source
         self.train = train
+        self.load_depth = bool(load_depth)
+        # If set, resize depth to (S, S) before min-max; else match RGB tensor H×W.
+        self.depth_image_size = int(depth_image_size) if depth_image_size else None
 
         tasks, episodes = load_meta(str(self.root))
 
@@ -141,6 +157,9 @@ class HumanoidEverydayDataset(Dataset):
                 f"robot={robot_type}. Run scripts/download_humanoid_everyday.py."
             )
 
+        if self.load_depth:
+            self._assert_depth_available(eligible[0]["episode_index"])
+
         self.q01, self.q99, self.stats_path = self._load_or_compute_stats(
             sorted(ep["episode_index"] for ep in eligible), robot_type, tuple(skills)
         )
@@ -163,13 +182,18 @@ class HumanoidEverydayDataset(Dataset):
         ]
 
         self._action_cache: "OrderedDict[int, np.ndarray]" = OrderedDict()
+        self._depth_cache: "OrderedDict[int, np.ndarray]" = OrderedDict()
         self._video_cache: "OrderedDict[int, Any]" = OrderedDict()
         self._max_open_videos = max_open_videos
+        # Depth frames are large (~1 MB/frame at 480×640 float32); keep few episodes.
+        self._max_cached_depth_eps = 4
 
         n_frames = len(self.samples)
+        depth_msg = f" load_depth=True col={DEPTH_COLUMN}" if self.load_depth else ""
         print(f"[HumanoidEveryday] {'train' if train else 'val'}: "
               f"{len(selected)} episodes / {n_frames} frames | skills={list(skills)} "
-              f"robot={robot_type} action_dim={len(self.q01)} | stats={self.stats_path}")
+              f"robot={robot_type} action_dim={len(self.q01)} | stats={self.stats_path}"
+              f"{depth_msg}")
 
     # ------------------------------------------------------------------
     # Paths (LeRobot v2.0 layout; chunks of 1000 episodes)
@@ -179,6 +203,19 @@ class HumanoidEverydayDataset(Dataset):
 
     def _video_path(self, ep_idx: int) -> Path:
         return self.root / f"videos/chunk-{ep_idx // 1000:03d}/egocentric/episode_{ep_idx:06d}.mp4"
+
+    def _assert_depth_available(self, ep_idx: int) -> None:
+        import pyarrow.parquet as pq
+
+        names = pq.read_schema(self._parquet_path(ep_idx)).names
+        if DEPTH_COLUMN not in names:
+            raise FileNotFoundError(
+                f"load_depth=True but '{DEPTH_COLUMN}' missing under {self.root}. "
+                "Re-download with:\n"
+                "  python scripts/download_humanoid_everyday.py \\\n"
+                "    --output_dir /home/teams/research/robotics/humanoid_everyday_depth \\\n"
+                "    --include_depth"
+            )
 
     # ------------------------------------------------------------------
     # Action stats (q01/q99 per dim, cached under meta/)
@@ -232,11 +269,58 @@ class HumanoidEverydayDataset(Dataset):
             self._action_cache.popitem(last=False)
         return actions
 
+    def _read_depth_maps(self, ep_idx: int) -> np.ndarray:
+        """Return ``[T, H, W]`` float32 depth for one episode."""
+        import pyarrow.parquet as pq
+
+        table = pq.read_table(self._parquet_path(ep_idx), columns=[DEPTH_COLUMN])
+        frames = table.column(DEPTH_COLUMN).to_pylist()
+        arr = np.stack([np.asarray(f, dtype=np.float32) for f in frames], axis=0)
+        if arr.ndim == 4:
+            arr = arr[..., 0]
+        if arr.ndim != 3:
+            raise ValueError(
+                f"Unexpected depth shape {arr.shape} for episode {ep_idx} "
+                f"(expected [T,H,W] from '{DEPTH_COLUMN}')"
+            )
+        return arr
+
+    def _episode_depth(self, ep_idx: int) -> np.ndarray:
+        if ep_idx in self._depth_cache:
+            self._depth_cache.move_to_end(ep_idx)
+            return self._depth_cache[ep_idx]
+        depth = self._read_depth_maps(ep_idx)
+        self._depth_cache[ep_idx] = depth
+        if len(self._depth_cache) > self._max_cached_depth_eps:
+            self._depth_cache.popitem(last=False)
+        return depth
+
     def _normalize(self, action: np.ndarray) -> np.ndarray:
         span = np.maximum(self.q99 - self.q01, 1e-8)
         unit = (action - self.q01) / span  # -> [0, 1] within bounds
         out = unit * (self.norm_max - self.norm_min) + self.norm_min
         return np.clip(out, self.norm_min, self.norm_max)
+
+    def _prepare_depth(self, ep_idx: int, t: int, rgb: torch.Tensor) -> torch.Tensor:
+        """Return depth ``[window_size, 1, H, W]`` aligned to RGB spatial size."""
+        frame = self._episode_depth(ep_idx)[t]  # [H0, W0]
+        if self.depth_image_size is not None:
+            target_hw = (self.depth_image_size, self.depth_image_size)
+        else:
+            target_hw = (int(rgb.shape[-2]), int(rgb.shape[-1]))
+
+        d = torch.from_numpy(np.asarray(frame, dtype=np.float32))
+        if d.ndim == 3:
+            d = d[..., 0]
+        d = d.unsqueeze(0).unsqueeze(0)  # [1, 1, H0, W0]
+        if d.shape[-2:] != target_hw:
+            d = F.interpolate(d, size=target_hw, mode="nearest")
+        # Per-frame min-max after resize (same spirit as LIBERO).
+        dmin = d.amin(dim=(-2, -1), keepdim=True)
+        dmax = d.amax(dim=(-2, -1), keepdim=True)
+        d = (d - dmin) / (dmax - dmin + 1e-6)
+        # window_size == 1 today; keep leading W dim for collater parity with LIBERO.
+        return d  # [1, 1, H, W]
 
     # ------------------------------------------------------------------
     # Video frame access (PyAV, per-worker container cache)
@@ -297,12 +381,15 @@ class HumanoidEverydayDataset(Dataset):
         frame = self._read_frame(ep_idx, t)
         rgb = self.image_fn([Image.fromarray(frame)])  # [window_size=1, C, H, W]
 
-        return {
+        sample: Dict[str, Any] = {
             "rgb": rgb,
             "action": action,          # [chunk_len, action_dim], normalized
             "action_mask": mask,       # [chunk_len]
             "lang": ep["instruction"],
         }
+        if self.load_depth:
+            sample["depth"] = self._prepare_depth(ep_idx, t, rgb)
+        return sample
 
     def collater(self, sample: List[Dict[str, Any]]) -> Dict[str, Any]:
         image_tensors = torch.stack([s["rgb"] for s in sample])[:, : self.window_size]
@@ -314,7 +401,7 @@ class HumanoidEverydayDataset(Dataset):
         action_chunck = action_tensors.unfold(1, self.fwd_pred_next_n, 1).permute(0, 1, 3, 2)
         chunck_mask = action_mask.unfold(1, self.fwd_pred_next_n, 1)
 
-        return {
+        out: Dict[str, Any] = {
             "rgb": image_tensors,
             "hand_rgb": None,
             "action": action_tensors,
@@ -325,3 +412,6 @@ class HumanoidEverydayDataset(Dataset):
             "raw_text": stacked_language,
             "data_source": self.data_source,
         }
+        if self.load_depth:
+            out["depth"] = torch.stack([s["depth"] for s in sample])[:, : self.window_size]
+        return out

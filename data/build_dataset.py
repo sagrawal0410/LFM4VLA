@@ -58,6 +58,10 @@ def build_dataset(dataset_cfg: Dict[str, Any], variant: Dict[str, Any], policy_m
 
     if dataset_type == "HumanoidEverydayDataset":
         data_root_dir = _resolve_path(cfg.pop("data_root_dir"), variant)
+        # Depth-conditioning configs set top-level use_depth; honor that if the
+        # dataset block does not override load_depth explicitly.
+        if "load_depth" not in cfg:
+            cfg["load_depth"] = bool(variant.get("use_depth", False))
         return data.HumanoidEverydayDataset(
             data_root_dir=data_root_dir,
             **common,

@@ -2,8 +2,8 @@
 
 Fetches, from the LeRobot-format HF dataset (default ``USC-GVL/humanoid-everyday``):
   * ``meta/`` (info.json, tasks.jsonl, episodes.jsonl)
-  * per selected episode: a SLIM parquet (low-dim columns only — the full parquet
-    bundles depth/LiDAR and is ~100 MB/episode) + the egocentric MP4
+  * per selected episode: a parquet (low-dim columns; optionally egocentric depth)
+    + the egocentric RGB MP4
 
 Episodes are selected by skill keywords in the task name (pick/place, push/pull,
 stack/align, pour by default) and robot type (G1 by default, 28-D actions).
@@ -12,11 +12,17 @@ Preferred env (NumPy 1.26 pin; leaves ``lfm4vla`` free for NumPy 2.x work):
     bash scripts/install_humanoid_everyday_env.sh
     conda activate lfm4vla-he
 
-Usage (cluster login node or workstation):
-    python scripts/download_humanoid_everyday.py \
+RGB-only (slim, ~small parquet + MP4):
+    python scripts/download_humanoid_everyday.py \\
         --output_dir /home/teams/research/robotics/humanoid_everyday
 
-Resume-safe: already-downloaded episodes are skipped.
+RGB + depth (separate tree; parquet keeps ``observation.depth.egocentric``):
+    python scripts/download_humanoid_everyday.py \\
+        --output_dir /home/teams/research/robotics/humanoid_everyday_depth \\
+        --include_depth
+
+Resume-safe: already-downloaded episodes are skipped (depth downloads re-fetch a
+parquet that is missing the depth column).
 """
 
 from __future__ import annotations
@@ -32,10 +38,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from data.humanoid_everyday_dataset import SKILL_KEYWORDS, task_matches_skills
+from data.humanoid_everyday_dataset import DEPTH_COLUMN, SKILL_KEYWORDS, task_matches_skills
 
 # Low-dim columns worth keeping in the slim parquet (intersected with the actual
-# schema per episode; depth/lidar/tactile blobs are dropped).
+# schema per episode). Depth is opt-in via --include_depth; lidar/tactile stay out.
 SLIM_COLUMNS = [
     "action",
     "observation.arm_joints",
@@ -83,8 +89,17 @@ def select_episodes(out: Path, skills, robot_type):
     return selected
 
 
-def slim_parquet(repo_id: str, ep_idx: int, out: Path) -> None:
-    """Write a slim local parquet, fetching only low-dim columns when possible."""
+def _parquet_has_column(path: Path, column: str) -> bool:
+    import pyarrow.parquet as pq
+
+    try:
+        return column in pq.read_schema(path).names
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def write_parquet(repo_id: str, ep_idx: int, out: Path, columns: list[str]) -> None:
+    """Write a local parquet with the requested columns (HTTP column projection when possible)."""
     import pyarrow.parquet as pq
 
     dest = out / parquet_rel(ep_idx)
@@ -92,21 +107,24 @@ def slim_parquet(repo_id: str, ep_idx: int, out: Path) -> None:
     tmp = dest.with_suffix(".tmp.parquet")
 
     try:
-        # Column projection over HTTP: only the selected columns' bytes are fetched.
         from huggingface_hub import HfFileSystem
 
         fs = HfFileSystem()
         remote = f"datasets/{repo_id}/{parquet_rel(ep_idx)}"
         schema_names = pq.read_schema(remote, filesystem=fs).names
-        cols = [c for c in SLIM_COLUMNS if c in schema_names]
+        cols = [c for c in columns if c in schema_names]
+        if not cols:
+            raise RuntimeError(f"none of {columns} found in remote schema {schema_names[:20]}...")
         table = pq.read_table(remote, columns=cols, filesystem=fs)
     except Exception:
-        # Fallback: download the full file, strip locally, delete the original.
+        # Fallback: download the full file, strip locally.
         from huggingface_hub import hf_hub_download
 
         full = hf_hub_download(repo_id, parquet_rel(ep_idx), repo_type="dataset")
         schema_names = pq.read_schema(full).names
-        cols = [c for c in SLIM_COLUMNS if c in schema_names]
+        cols = [c for c in columns if c in schema_names]
+        if not cols:
+            raise RuntimeError(f"none of {columns} found in schema {schema_names[:20]}...")
         table = pq.read_table(full, columns=cols)
 
     pq.write_table(table, tmp)
@@ -119,13 +137,23 @@ def download_video(repo_id: str, ep_idx: int, out: Path) -> None:
     hf_hub_download(repo_id, video_rel(ep_idx), repo_type="dataset", local_dir=str(out))
 
 
-def fetch_episode(repo_id: str, ep_idx: int, out: Path) -> str:
-    done_parquet = (out / parquet_rel(ep_idx)).is_file()
+def fetch_episode(repo_id: str, ep_idx: int, out: Path, columns: list[str],
+                  require_depth: bool) -> str:
+    parquet_path = out / parquet_rel(ep_idx)
     done_video = (out / video_rel(ep_idx)).is_file()
+    done_parquet = parquet_path.is_file()
+    if require_depth and done_parquet and not _parquet_has_column(parquet_path, DEPTH_COLUMN):
+        done_parquet = False  # force re-fetch with depth column
+
     if done_parquet and done_video:
         return "skip"
     if not done_parquet:
-        slim_parquet(repo_id, ep_idx, out)
+        write_parquet(repo_id, ep_idx, out, columns)
+        if require_depth and not _parquet_has_column(parquet_path, DEPTH_COLUMN):
+            raise RuntimeError(
+                f"episode {ep_idx}: requested depth but column '{DEPTH_COLUMN}' "
+                "missing from HF parquet schema"
+            )
     if not done_video:
         download_video(repo_id, ep_idx, out)
     return "done"
@@ -142,24 +170,60 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=8, help="Parallel download threads")
     ap.add_argument("--limit", type=int, default=None,
                     help="Cap episode count (e.g. small smoke-test download)")
+    ap.add_argument(
+        "--include_depth",
+        action="store_true",
+        help=(
+            f"Keep '{DEPTH_COLUMN}' in each parquet (~100 MB/episode). "
+            "Use a separate --output_dir from the RGB-only tree "
+            "(e.g. .../humanoid_everyday_depth)."
+        ),
+    )
     args = ap.parse_args()
 
     out = Path(args.output_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
 
+    columns = list(SLIM_COLUMNS)
+    if args.include_depth:
+        columns.append(DEPTH_COLUMN)
+
     print(f"[1/3] meta files -> {out}/meta")
     download_meta(args.repo_id, out)
+
+    # Record what this tree contains so train configs / humans can tell RGB vs depth.
+    marker = {
+        "include_depth": bool(args.include_depth),
+        "depth_column": DEPTH_COLUMN if args.include_depth else None,
+        "parquet_columns": columns,
+        "repo_id": args.repo_id,
+        "skills": list(args.skills),
+        "robot_type": args.robot_type,
+    }
+    marker_path = out / "meta" / "download_manifest.json"
+    with open(marker_path, "w") as f:
+        json.dump(marker, f, indent=2)
+        f.write("\n")
 
     episodes = select_episodes(out, args.skills, args.robot_type)
     if args.limit:
         episodes = episodes[: args.limit]
+    mode = "RGB+depth" if args.include_depth else "RGB-only (slim)"
     print(f"[2/3] selected {len(episodes)} episodes "
-          f"(skills={args.skills}, robot={args.robot_type or 'all'})")
+          f"(skills={args.skills}, robot={args.robot_type or 'all'}, mode={mode})")
+    if args.include_depth:
+        print("  NOTE: depth parquets are large (~100 MB/episode). Prefer a dedicated "
+              "output_dir (e.g. humanoid_everyday_depth).")
 
-    print(f"[3/3] downloading slim parquet + egocentric MP4 with {args.workers} threads...")
+    print(f"[3/3] downloading parquet + egocentric MP4 with {args.workers} threads...")
     n_done = n_skip = n_fail = 0
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(fetch_episode, args.repo_id, ep, out): ep for ep in episodes}
+        futures = {
+            pool.submit(
+                fetch_episode, args.repo_id, ep, out, columns, args.include_depth
+            ): ep
+            for ep in episodes
+        }
         for i, fut in enumerate(as_completed(futures), 1):
             ep = futures[fut]
             try:
@@ -182,9 +246,13 @@ def main() -> None:
     if n_fail:
         print("Re-run the same command to retry failed episodes (resume-safe).")
     print(f"\nPoint train_dataset.data_root_dir at: {out}")
-    print("Then:")
-    print("  sbatch scripts/train_lfm_he_450m.sbatch")
-    print("  sbatch scripts/train_lfm_he_1.6b.sbatch")
+    if args.include_depth:
+        print("Then (depth + Q-Former token sweep):")
+        print("  sbatch scripts/train_lfm_he_depth_token_sweep.sbatch")
+    else:
+        print("Then:")
+        print("  sbatch scripts/train_lfm_he_450m.sbatch")
+        print("  sbatch scripts/train_lfm_he_token_sweep.sbatch")
 
 
 if __name__ == "__main__":
