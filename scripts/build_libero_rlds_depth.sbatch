@@ -39,7 +39,8 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV_SIM"
 
 export PYTHONUNBUFFERED=1
-export MUJOCO_GL="${MUJOCO_GL:-egl}"
+# auto = try GPU EGL, then software EGL, then OSMesa (same as LIBERO eval).
+export MUJOCO_GL="${MUJOCO_GL:-auto}"
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
 
 echo "=== LIBERO depth RLDS build ==="
@@ -47,6 +48,11 @@ echo "job=${SLURM_JOB_ID:-local}"
 echo "RAW_DIR=$RAW_DIR"
 echo "HDF5_DEPTH_DIR=$HDF5_DEPTH_DIR"
 echo "RLDS_OUT=$RLDS_OUT"
+echo "MUJOCO_GL=$MUJOCO_GL CONDA_PREFIX=$CONDA_PREFIX"
+
+# Headless GL libs (safe no-op if already installed).
+conda install -y -c conda-forge "mesalib<=25.1.0" libegl-devel glew || true
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
 
 # ---------------------------------------------------------------------------
 # 1) Download raw LIBERO HDF5
@@ -90,7 +96,8 @@ if [[ -z "$(ls -A "$HDF5_DEPTH_DIR"/*.hdf5 2>/dev/null || true)" ]]; then
   srun python scripts/regenerate_libero_hdf5_with_depth.py \
     --libero_task_suite "$SUITE" \
     --libero_raw_data_dir "$RAW_DIR/$SUITE" \
-    --libero_target_dir "$HDF5_DEPTH_DIR"
+    --libero_target_dir "$HDF5_DEPTH_DIR" \
+    --mujoco_gl "$MUJOCO_GL"
 else
   echo "[2/3] Depth HDF5 already present: $HDF5_DEPTH_DIR — skip regenerate"
 fi
