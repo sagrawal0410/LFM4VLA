@@ -646,35 +646,36 @@ OXE_DATASET_CONFIGS = {
     ### LIBERO datasets (modified versions)
     "libero_spatial_no_noops": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": "wrist_image"},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        # GT agentview depth (meters or normalized float) when demos are rebuilt with depth.
+        "depth_obs_keys": {"primary": "depth", "secondary": None, "wrist": None},
         "state_obs_keys": ["EEF_state", None, "gripper_state"],
         "state_encoding": StateEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "libero_object_no_noops": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": "wrist_image"},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": {"primary": "depth", "secondary": None, "wrist": None},
         "state_obs_keys": ["EEF_state", None, "gripper_state"],
         "state_encoding": StateEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "libero_goal_no_noops": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": "wrist_image"},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": {"primary": "depth", "secondary": None, "wrist": None},
         "state_obs_keys": ["EEF_state", None, "gripper_state"],
         "state_encoding": StateEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "libero_10_no_noops": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": "wrist_image"},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": {"primary": "depth", "secondary": None, "wrist": None},
         "state_obs_keys": ["EEF_state", None, "gripper_state"],
         "state_encoding": StateEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "libero_4_task_suites_no_noops": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": "wrist_image"},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": {"primary": "depth", "secondary": None, "wrist": None},
         "state_obs_keys": ["EEF_state",None, "gripper_state"],
         "state_encoding": StateEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,

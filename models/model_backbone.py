@@ -48,6 +48,8 @@ class RoboVLMBackbone(nn.Module):
         vision_resampler_configs=None,
         use_clip_norm=False,
         use_state=False,
+        use_depth=False,
+        depth_configs=None,
         **kwargs,
     ):
         super().__init__()
@@ -62,6 +64,8 @@ class RoboVLMBackbone(nn.Module):
         self.vision_masked_ratio = vision_masked_ratio  #0.9
         self.use_tube_mask = use_tube_mask  #False
         self.use_state = use_state  #False
+        self.use_depth = use_depth or bool((configs or {}).get("use_depth", False))
+        self.depth_configs = depth_configs if depth_configs is not None else (configs or {}).get("depth")
         self.fwd_pred_next_n = fwd_pred_next_n  #10
 
         self.kwargs = kwargs
@@ -82,6 +86,8 @@ class RoboVLMBackbone(nn.Module):
         if self.train_setup_configs.get("reinit", False):  # False
             initialize_params(self.backbone)
         self.act_head, self.fwd_head, self.clip_norm_head = self._init_heads()
+        self.depth_conditioner = self._init_depth_modules()
+        self.depth_estimator = None  # removed; LIBERO GT depth only
 
         if self.act_head_configs is not None:
             self.action_space = self.act_head_configs.get("action_space", "continuous")
@@ -356,6 +362,17 @@ class RoboVLMBackbone(nn.Module):
             action_head = _cls(**_kwargs)
 
         return action_head, None, None
+
+    def _init_depth_modules(self):
+        """Build depth CNN+QFormer. Expects LIBERO GT depth maps in the batch."""
+        if not self.use_depth:
+            return None
+        if not self.depth_configs:
+            raise ValueError("use_depth=True requires a non-empty ``depth`` config block.")
+
+        from models.depth_conditioning import DepthConditioner
+
+        return DepthConditioner(self.hidden_size, self.depth_configs)
     
     def cat_multi_modal_input(
         self,
@@ -435,6 +452,9 @@ class RoboVLMBackbone(nn.Module):
         
         if self.act_head is not None:
             self.act_head.requires_grad_(True)
+
+        if self.depth_conditioner is not None:
+            self.depth_conditioner.requires_grad_(True)
     
     def forward_action_head(
         self,
@@ -682,13 +702,13 @@ class RoboVLMBackbone(nn.Module):
         prediction = {}
 
         assert vision_x is not None
-        bs, seq_len = vision_x.shape[:2]
         prediction["action"] = self.forward_continuous(
             vision_x,
             lang_x,
             attention_mask,
             vision_gripper=vision_gripper,
             mode="inference",
+            **kwargs,
         )
 
         return prediction

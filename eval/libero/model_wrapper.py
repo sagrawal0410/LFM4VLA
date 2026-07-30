@@ -95,6 +95,7 @@ class LFMLiberoModel:
         self.image_size = image_size
         self.image_transform = image_transform
         self.gripper_open_is_negative = gripper_open_is_negative
+        self.use_depth = bool(configs.get("use_depth", False))
 
         self.q01 = action_stats["q01"]
         self.q99 = action_stats["q99"]
@@ -115,7 +116,13 @@ class LFMLiberoModel:
     # ------------------------------------------------------------------
     # Control interface
     # ------------------------------------------------------------------
-    def step(self, image: np.ndarray, instruction: str, execute_step: int = 1) -> np.ndarray:
+    def step(
+        self,
+        image: np.ndarray,
+        instruction: str,
+        execute_step: int = 1,
+        depth: np.ndarray | None = None,
+    ) -> np.ndarray:
         """Return one 7-D LIBERO action for the current agentview frame.
 
         ``execute_step == 1`` re-queries the policy every env step (closed-loop). Larger
@@ -125,11 +132,11 @@ class LFMLiberoModel:
         assert 1 <= execute_step <= self.fwd_pred_next_n
 
         if execute_step == 1:
-            chunk = self._predict_chunk(image, instruction)
+            chunk = self._predict_chunk(image, instruction, depth=depth)
             action = chunk[0]
         else:
             if not self._chunk_buffer or self._steps_since_replan >= execute_step:
-                chunk = self._predict_chunk(image, instruction)
+                chunk = self._predict_chunk(image, instruction, depth=depth)
                 self._chunk_buffer = list(chunk[:execute_step])
                 self._steps_since_replan = 0
             action = self._chunk_buffer.pop(0)
@@ -171,7 +178,12 @@ class LFMLiberoModel:
             raise ValueError(f"Unknown image_transform: {self.image_transform}")
         return np.ascontiguousarray(img)
 
-    def _predict_chunk(self, image: np.ndarray, instruction: str) -> np.ndarray:
+    def _predict_chunk(
+        self,
+        image: np.ndarray,
+        instruction: str,
+        depth: np.ndarray | None = None,
+    ) -> np.ndarray:
         img = self._preprocess_image(image)
         pil = Image.fromarray(img).convert("RGB").resize(
             (self.image_size, self.image_size), Image.BILINEAR
@@ -180,6 +192,19 @@ class LFMLiberoModel:
         rgb = rgb.unsqueeze(0).unsqueeze(0)  # [B=1, T=1, C, H, W]
 
         batch = {"rgb": rgb, "text": [instruction]}
+        if self.use_depth:
+            if depth is None:
+                raise ValueError("use_depth=True but no LIBERO agentview depth was passed.")
+            from utils.libero_depth import preprocess_depth_like_rgb
+
+            depth_arr = preprocess_depth_like_rgb(
+                depth,
+                image_transform=self.image_transform,
+                image_size=self.image_size,
+            )
+            depth_t = torch.from_numpy(depth_arr).float().unsqueeze(0).unsqueeze(0).unsqueeze(0)
+            # [B=1, T=1, 1, H, W]
+            batch["depth"] = depth_t
         with torch.no_grad():
             pred = self.trainer.inference_step(batch)["action"]
 

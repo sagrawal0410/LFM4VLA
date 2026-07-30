@@ -191,16 +191,39 @@ class RoboLFM25VL(RoboVLMBackbone):
         pixel_values: torch.Tensor,
         spatial_shapes: torch.Tensor,
         pixel_attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """Scatter projected vision features into ``image_token_id`` placeholder positions."""
+        *,
+        return_image_tokens: bool = False,
+    ):
+        """Scatter projected vision features into ``image_token_id`` placeholder positions.
+
+        When ``return_image_tokens=True``, also returns per-sample image token features
+        ``[B, Ni_max, D]`` (zero-padded) and a boolean mask ``[B, Ni_max]`` for the QFormer.
+        """
         image_outputs = self.model.get_image_features(
             pixel_values=pixel_values,
             spatial_shapes=spatial_shapes,
             pixel_attention_mask=pixel_attention_mask,
             return_dict=True,
         )
-        image_features = torch.cat(image_outputs.pooler_output, dim=0)
-        image_features = image_features.to(device=input_embeds.device, dtype=input_embeds.dtype)
+        # pooler_output is typically a list/tuple of [Ni_i, D] (one per image).
+        pooler = image_outputs.pooler_output
+        if isinstance(pooler, (list, tuple)):
+            per_image = [
+                feat.to(device=input_embeds.device, dtype=input_embeds.dtype)
+                for feat in pooler
+            ]
+        else:
+            # Fallback: already concatenated [sum Ni, D] — treat as one block per batch row
+            # only when lengths are uniform (split equally).
+            flat = pooler.to(device=input_embeds.device, dtype=input_embeds.dtype)
+            bs_flat = input_embeds.shape[0]
+            if flat.shape[0] % bs_flat != 0:
+                raise ValueError(
+                    f"Cannot split flat image features {flat.shape[0]} across batch {bs_flat}"
+                )
+            n_each = flat.shape[0] // bs_flat
+            per_image = list(flat.split(n_each, dim=0))
+        image_features = torch.cat(per_image, dim=0)
 
         n_image_tokens = (input_ids == self.image_token_id).sum().item()
         n_image_features = image_features.shape[0]
@@ -210,7 +233,70 @@ class RoboLFM25VL(RoboVLMBackbone):
                 f"tokens={n_image_tokens}, features={n_image_features}")
 
         image_mask = (input_ids == self.image_token_id).unsqueeze(-1).expand_as(input_embeds)
-        return input_embeds.masked_scatter(image_mask.to(input_embeds.device), image_features)
+        fused = input_embeds.masked_scatter(image_mask.to(input_embeds.device), image_features)
+
+        if not return_image_tokens:
+            return fused
+
+        # Pack variable-length per-image features into a padded batch for the QFormer.
+        bs = input_embeds.shape[0]
+        if len(per_image) != bs:
+            # Multiple images per sample is unsupported for depth fusion currently.
+            raise ValueError(
+                f"Depth QFormer expects one image feature tensor per batch row "
+                f"(got {len(per_image)} feature groups for batch {bs})."
+            )
+        max_n = max(t.shape[0] for t in per_image)
+        dim = per_image[0].shape[-1]
+        packed = image_features.new_zeros(bs, max_n, dim)
+        packed_mask = torch.zeros(bs, max_n, dtype=torch.bool, device=image_features.device)
+        for i, feat in enumerate(per_image):
+            n = feat.shape[0]
+            packed[i, :n] = feat
+            packed_mask[i, :n] = True
+        return fused, packed, packed_mask
+
+    def _resolve_depth_maps(
+        self,
+        vision_x: torch.Tensor,
+        depth: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Return LIBERO GT depth maps ``[B*T, 1, H, W]`` from the batch."""
+        bs, seq_len = vision_x.shape[:2]
+        if depth is None:
+            raise ValueError(
+                "use_depth=True but no depth tensor was provided. "
+                "Training must load LIBERO depth maps; eval must pass agentview_depth."
+            )
+        if depth.ndim == 5:
+            depth = rearrange(depth, "b t c h w -> (b t) c h w")
+        elif depth.ndim == 4 and depth.shape[1] != 1:
+            # [B, T, H, W]
+            depth = rearrange(depth, "b t h w -> (b t) 1 h w")
+        elif depth.ndim == 3:
+            depth = depth.unsqueeze(1)
+        if depth.shape[0] != bs * seq_len:
+            raise ValueError(
+                f"depth batch {depth.shape[0]} != bs*seq_len {bs * seq_len}"
+            )
+        return depth.to(device=vision_x.device, dtype=torch.float32)
+
+    def _insert_depth_tokens(
+        self,
+        multimodal_embeds: torch.Tensor,
+        multimodal_attention_mask: Optional[torch.Tensor],
+        depth_tokens: torch.Tensor,
+    ):
+        """Append QFormer depth tokens just before the (soon-to-be-added) action tokens."""
+        return self.merge_multi_modal_input(
+            multimodal_embeds,
+            depth_tokens,
+            labels=None,
+            attention_mask=multimodal_attention_mask,
+            is_image=False,
+            insert_idx=multimodal_embeds.shape[1],
+            fill_zero=False,
+        )[:3]  # embeds, labels, attn_mask (drop insert_mask)
 
     @staticmethod
     def _format_loss(loss: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -233,6 +319,7 @@ class RoboLFM25VL(RoboVLMBackbone):
         vision_gripper=None,
         raw_text=None,
         rel_state=None,
+        depth=None,
         mode: str = "train",
         **kwargs,
     ):
@@ -256,13 +343,24 @@ class RoboLFM25VL(RoboVLMBackbone):
             f"batch size mismatch: input_ids {input_ids.shape[0]} vs bs*seq_len {bs * seq_len}")
 
         input_embeds = self.word_embedding(input_ids)
-        input_embeds = self._fuse_image_features(
-            input_ids,
-            input_embeds,
-            pixel_values,
-            spatial_shapes,
-            pixel_attention_mask,
-        )
+        if self.use_depth and self.depth_conditioner is not None:
+            input_embeds, image_tokens, _image_tok_mask = self._fuse_image_features(
+                input_ids,
+                input_embeds,
+                pixel_values,
+                spatial_shapes,
+                pixel_attention_mask,
+                return_image_tokens=True,
+            )
+        else:
+            input_embeds = self._fuse_image_features(
+                input_ids,
+                input_embeds,
+                pixel_values,
+                spatial_shapes,
+                pixel_attention_mask,
+            )
+            image_tokens = None
 
         multimodal_embeds = input_embeds
         multimodal_labels = None
@@ -273,6 +371,26 @@ class RoboLFM25VL(RoboVLMBackbone):
 
         if rel_state is not None and self.use_state:
             raise NotImplementedError("rel_state conditioning is not implemented for LFM2.5-VL yet.")
+
+        # Depth CNN → QFormer (cross-attn over depth / image / text) → insert tokens.
+        if self.use_depth and self.depth_conditioner is not None:
+            depth_maps = self._resolve_depth_maps(vision_x, depth)
+            # Text tokens = non-image embeddings already in the sequence (instruction).
+            text_mask = (input_ids != self.image_token_id)
+            if multimodal_attention_mask is not None:
+                text_mask = text_mask & multimodal_attention_mask.bool()
+            depth_tokens = self.depth_conditioner(
+                depth=depth_maps.to(dtype=multimodal_embeds.dtype, device=multimodal_embeds.device),
+                image_tokens=image_tokens.to(dtype=multimodal_embeds.dtype),
+                text_tokens=multimodal_embeds,
+                text_mask=text_mask,
+            )
+            depth_tokens = depth_tokens.to(dtype=multimodal_embeds.dtype)
+            multimodal_embeds, multimodal_labels, multimodal_attention_mask = (
+                self._insert_depth_tokens(
+                    multimodal_embeds, multimodal_attention_mask, depth_tokens
+                )
+            )
 
         action_token_mask = None
         if action_space == "continuous":

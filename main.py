@@ -12,6 +12,8 @@ def parse_args():
                         help="Override act_head.num_action_tokens (distinct learned queries)")
     parser.add_argument("--latent", type=int, default=None,
                         help="Override act_head.latent (per-token repeat factor)")
+    parser.add_argument("--depth_num_queries", type=int, default=None,
+                        help="Override depth.qformer.num_queries (fused tokens into LLM)")
     parser.add_argument("--task_name", type=str, default=None,
                         help="Override top-level task_name (used in run dirs / wandb)")
     return vars(parser.parse_args())
@@ -24,6 +26,11 @@ def update_configs(configs, args):
         configs.setdefault("act_head", {})["num_action_tokens"] = args["num_action_tokens"]
     if args.get("latent") is not None:
         configs.setdefault("act_head", {})["latent"] = args["latent"]
+    if args.get("depth_num_queries") is not None:
+        configs.setdefault("depth", {}).setdefault("qformer", {})["num_queries"] = (
+            args["depth_num_queries"]
+        )
+        configs["use_depth"] = True
     if args.get("task_name"):
         configs["task_name"] = args["task_name"]
     return configs

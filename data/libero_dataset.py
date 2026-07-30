@@ -56,6 +56,7 @@ class LiberoRLDSDataset(IterableDataset):
         norm_min: float = -1.0,
         norm_max: float = 1.0,
         data_source: str = "libero_action",
+        load_depth: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -67,6 +68,8 @@ class LiberoRLDSDataset(IterableDataset):
         self.norm_min = norm_min
         self.norm_max = norm_max
         self.data_source = data_source
+        self.load_depth = bool(load_depth)
+        self.image_size = int(image_size)
 
         self.dataset, self.dataset_length, self.dataset_statistics = self._build_rlds(
             data_root_dir=str(data_root_dir),
@@ -77,6 +80,7 @@ class LiberoRLDSDataset(IterableDataset):
             shuffle_buffer_size=shuffle_buffer_size,
             train=train,
             image_aug=image_aug,
+            load_depth=self.load_depth,
         )
 
     @staticmethod
@@ -89,6 +93,7 @@ class LiberoRLDSDataset(IterableDataset):
         shuffle_buffer_size: int,
         train: bool,
         image_aug: bool,
+        load_depth: bool = False,
     ):
         from prismatic.vla.datasets.rlds import make_interleaved_dataset
         from prismatic.vla.datasets.rlds.oxe import (
@@ -102,7 +107,7 @@ class LiberoRLDSDataset(IterableDataset):
             data_root_dir,
             mixture_spec,
             load_camera_views=("primary",),  # agentview only; wrist not fed to the model
-            load_depth=False,
+            load_depth=load_depth,
             load_proprio=False,
             load_language=True,
             action_proprio_normalization_type=NormalizationType.BOUNDS_Q99,
@@ -112,6 +117,8 @@ class LiberoRLDSDataset(IterableDataset):
             resize_size=(image_size, image_size),
             num_parallel_calls=16,
         )
+        if load_depth:
+            frame_transform_kwargs["depth_resize_size"] = (image_size, image_size)
         if image_aug:
             frame_transform_kwargs["image_augment_kwargs"] = dict(
                 random_resized_crop=dict(scale=[0.9, 0.9], ratio=[1.0, 1.0]),
@@ -153,6 +160,22 @@ class LiberoRLDSDataset(IterableDataset):
     def __len__(self) -> int:
         return self.dataset_length
 
+    @staticmethod
+    def _normalize_depth_window(depth: np.ndarray) -> torch.Tensor:
+        """Convert RLDS depth ``[W, H, W, 1|C]`` → ``[W, 1, H, W]`` float in ``[0, 1]``."""
+        d = np.asarray(depth, dtype=np.float32)
+        if d.ndim == 3:
+            d = d[..., None]
+        if d.shape[-1] > 1:
+            d = d[..., :1]
+        # Per-frame min-max (matches eval preprocessing).
+        flat = d.reshape(d.shape[0], -1)
+        dmin = flat.min(axis=1).reshape(-1, 1, 1, 1)
+        dmax = flat.max(axis=1).reshape(-1, 1, 1, 1)
+        d = (d - dmin) / (dmax - dmin + 1e-6)
+        # [W, H, W, 1] → [W, 1, H, W]
+        return torch.from_numpy(np.transpose(d, (0, 3, 1, 2)).copy())
+
     def __iter__(self):
         for frame in self.dataset.as_numpy_iterator():
             images = np.asarray(frame["observation"]["image_primary"])  # [W, H, W, 3] uint8
@@ -174,7 +197,19 @@ class LiberoRLDSDataset(IterableDataset):
             rgb = self.image_fn([Image.fromarray(img) for img in images])  # [W, C, H, W]
             lang = frame["task"]["language_instruction"].decode()
 
-            yield {"rgb": rgb, "action": action, "action_mask": action_mask, "lang": lang}
+            sample = {"rgb": rgb, "action": action, "action_mask": action_mask, "lang": lang}
+            if self.load_depth:
+                if "depth_primary" not in frame["observation"]:
+                    raise KeyError(
+                        "load_depth=True but observation has no 'depth_primary'. "
+                        "Rebuild LIBERO RLDS with agentview depth (see "
+                        "scripts/regenerate_libero_hdf5_with_depth.py)."
+                    )
+                depth = np.asarray(frame["observation"]["depth_primary"])
+                if depth.ndim == 2:
+                    depth = depth[None]
+                sample["depth"] = self._normalize_depth_window(depth)
+            yield sample
 
     def collater(self, sample: List[Dict[str, Any]]) -> Dict[str, Any]:
         image_tensors = torch.stack([s["rgb"] for s in sample])[:, : self.window_size]
@@ -186,7 +221,7 @@ class LiberoRLDSDataset(IterableDataset):
         action_chunck = action_tensors.unfold(1, self.fwd_pred_next_n, 1).permute(0, 1, 3, 2)
         chunck_mask = action_mask.unfold(1, self.fwd_pred_next_n, 1)
 
-        return {
+        out = {
             "rgb": image_tensors,
             "hand_rgb": None,
             "action": action_tensors,
@@ -197,3 +232,6 @@ class LiberoRLDSDataset(IterableDataset):
             "raw_text": stacked_language,
             "data_source": self.data_source,
         }
+        if self.load_depth:
+            out["depth"] = torch.stack([s["depth"] for s in sample])[:, : self.window_size]
+        return out

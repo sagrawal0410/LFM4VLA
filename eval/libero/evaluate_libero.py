@@ -242,6 +242,8 @@ def _make_env(task, resolution: int = 256, live_render: bool = False):
         "bddl_file_name": task_bddl,
         "camera_heights": resolution,
         "camera_widths": resolution,
+        # GT depth for depth-conditioned policies (agentview_depth in obs).
+        "camera_depths": True,
     }
     if live_render:
         # ControlEnv is not in libero.libero.envs.__init__; import from wrapper.
@@ -266,6 +268,13 @@ def _get_agentview(obs) -> np.ndarray:
     return np.asarray(obs["agentview_image"])
 
 
+def _get_agentview_depth(obs, env) -> np.ndarray:
+    """Extract metric-normalized agentview depth ``[H, W]`` float32."""
+    from utils.libero_depth import extract_agentview_depth
+
+    return extract_agentview_depth(obs, env, normalize=True)
+
+
 def rollout(env, model, task, init_state, out_dir, task_i, ep_i, execute_step,
             max_steps, save_video, video_fps, num_wait_steps=10, live_render=False):
     """Run one episode; return (success, num_steps)."""
@@ -273,6 +282,8 @@ def rollout(env, model, task, init_state, out_dir, task_i, ep_i, execute_step,
     env.reset()
     obs = env.set_init_state(init_state)
     model.reset()
+
+    use_depth = bool(getattr(model, "use_depth", False))
 
     # LIBERO physics settle: step a few no-op actions before control starts.
     dummy = np.zeros(7, dtype=np.float32)
@@ -289,10 +300,11 @@ def rollout(env, model, task, init_state, out_dir, task_i, ep_i, execute_step,
     try:
         for step_i in range(max_steps):
             frame = _get_agentview(obs)
+            depth = _get_agentview_depth(obs, env) if use_depth else None
             if recorder is not None:
                 # Record the human-viewable frame (rot180 to undo robosuite flip).
                 recorder.add(np.ascontiguousarray(frame[::-1, ::-1]))
-            action = model.step(frame, instruction, execute_step=execute_step)
+            action = model.step(frame, instruction, execute_step=execute_step, depth=depth)
             obs, reward, done, info = env.step(action.tolist())
             if live_render:
                 env.env.render()

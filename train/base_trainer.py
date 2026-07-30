@@ -40,6 +40,8 @@ class BaseTrainer(pl.LightningModule):
             vision_resampler_configs=self.configs.get("vision_resampler", None),
             use_clip_norm=self.configs.get("use_clip_norm", False),
             use_state=self.configs.get("use_state", False),
+            use_depth=self.configs.get("use_depth", False),
+            depth_configs=self.configs.get("depth"),
         )
         model.train()
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -291,6 +293,12 @@ class BaseTrainer(pl.LightningModule):
         else:
             hand_rgb = None
 
+        depth = batch.get("depth")
+        if self.configs.get("use_depth", False) and depth is not None:
+            depth = depth.to(self.device)
+        else:
+            depth = None
+
         arm_action_chunck = None
         gripper_action_chunck = None
         action_chunck = batch.get("action_chunck")
@@ -307,6 +315,8 @@ class BaseTrainer(pl.LightningModule):
             rgb = rgb[:, :seq_len]
             if hand_rgb is not None:
                 hand_rgb = hand_rgb[:, :seq_len]
+            if depth is not None and depth.ndim >= 5:
+                depth = depth[:, :seq_len]
 
         chunck_mask = batch.get("chunck_mask")
         if chunck_mask is not None:
@@ -315,6 +325,7 @@ class BaseTrainer(pl.LightningModule):
         return {
             "rgb": rgb,
             "hand_rgb": hand_rgb,
+            "depth": depth,
             "attention_mask": attention_mask,
             "language": language,
             "text_mask": text_mask,
@@ -337,6 +348,7 @@ class BaseTrainer(pl.LightningModule):
             vision_gripper=inputs["hand_rgb"],
             raw_text=inputs["raw_text"],
             rel_state=inputs["rel_state"],
+            depth=inputs["depth"],
             data_source=inputs["data_source"],
             mode=mode,
         )
@@ -403,6 +415,7 @@ class BaseTrainer(pl.LightningModule):
                 vision_gripper=inputs["hand_rgb"],
                 raw_text=inputs["raw_text"],
                 rel_state=inputs["rel_state"],
+                depth=inputs.get("depth"),
             )
 
     def get_grouped_params(self, model):
