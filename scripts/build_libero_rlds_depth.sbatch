@@ -39,9 +39,11 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV_SIM"
 
 export PYTHONUNBUFFERED=1
-# auto = try GPU EGL, then software EGL, then OSMesa (same as LIBERO eval).
+# Default auto: software EGL → OSMesa → GPU EGL (bare GPU EGL often fails on SLURM).
 export MUJOCO_GL="${MUJOCO_GL:-auto}"
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+# Help mesa software paths find DRI drivers.
+export LIBGL_DRIVERS_PATH="${LIBGL_DRIVERS_PATH:-${CONDA_PREFIX}/lib/dri}"
 
 echo "=== LIBERO depth RLDS build ==="
 echo "job=${SLURM_JOB_ID:-local}"
@@ -53,6 +55,7 @@ echo "MUJOCO_GL=$MUJOCO_GL CONDA_PREFIX=$CONDA_PREFIX"
 # Headless GL libs (safe no-op if already installed).
 conda install -y -c conda-forge "mesalib<=25.1.0" libegl-devel glew || true
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+export LIBGL_DRIVERS_PATH="${CONDA_PREFIX}/lib/dri:${LIBGL_DRIVERS_PATH:-}"
 
 # ---------------------------------------------------------------------------
 # 1) Download raw LIBERO HDF5

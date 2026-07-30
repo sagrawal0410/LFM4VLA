@@ -252,7 +252,7 @@ if __name__ == "__main__":
     ap.add_argument(
         "--mujoco_gl",
         default=os.environ.get("MUJOCO_GL", "auto"),
-        choices=["auto", "egl", "osmesa"],
-        help="Headless GL backend. 'auto' tries egl → software egl → osmesa.",
+        choices=["auto", "egl", "egl_software", "egl_headless", "osmesa"],
+        help="Headless GL backend. 'auto' tries software EGL → OSMesa → GPU EGL.",
     )
     main(ap.parse_args())
