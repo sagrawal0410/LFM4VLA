@@ -119,7 +119,9 @@ fi
 # ---------------------------------------------------------------------------
 if [[ -z "$(ls -A "$HDF5_DEPTH_DIR"/*.hdf5 2>/dev/null || true)" ]]; then
   echo "[2/3] Regenerating HDF5 with agentview_depth → $HDF5_DEPTH_DIR"
-  srun env -u MUJOCO_GL python scripts/regenerate_libero_hdf5_with_depth.py \
+  # Do not use `env -u` — some nodes resolve a broken ~/.local/bin/env.
+  unset MUJOCO_GL || true
+  srun python scripts/regenerate_libero_hdf5_with_depth.py \
     --libero_task_suite "$SUITE" \
     --libero_raw_data_dir "$RAW_DIR/$SUITE" \
     --libero_target_dir "$HDF5_DEPTH_DIR" \
