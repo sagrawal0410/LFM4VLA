@@ -1,0 +1,114 @@
+#!/bin/bash
+#SBATCH --job-name=libero_rlds_depth
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-gpu=16
+#SBATCH --time=48:00:00
+#SBATCH --output=output_libero_rlds_depth_%j.out
+#SBATCH --error=output_libero_rlds_depth_%j.err
+
+# Build LIBERO-10 RLDS with GT agentview depth at:
+#   /home/teams/research/robotics/modified_libero_rlds_depth
+#
+# Usage:
+#   sbatch scripts/build_libero_rlds_depth.sbatch
+#
+# Then launch the 8-run training sweep (1 GPU per array task):
+#   sbatch --dependency=afterok:<JOBID> \
+#     --export=ALL,CONFIG=configs/lfm2.5-vl-450m-libero-depth-latent1.json \
+#     scripts/train_lfm_libero_depth_sweep.sbatch
+
+set -euo pipefail
+
+LFM4VLA_ROOT="${LFM4VLA_ROOT:-$HOME/LFM4VLA}"
+CONDA_ENV_SIM="${CONDA_ENV_SIM:-lfm4vla}"
+CONDA_ENV_RLDS="${CONDA_ENV_RLDS:-${CONDA_ENV_SIM}}"
+
+DATA_ROOT="${DATA_ROOT:-/home/teams/research/robotics}"
+RAW_ROOT="${RAW_ROOT:-$DATA_ROOT/libero_raw}"
+RAW_DIR="${RAW_DIR:-$RAW_ROOT/LIBERO-datasets}"
+HDF5_DEPTH_DIR="${HDF5_DEPTH_DIR:-$DATA_ROOT/libero_hdf5_depth/libero_10_no_noops}"
+RLDS_OUT="${RLDS_OUT:-$DATA_ROOT/modified_libero_rlds_depth}"
+SUITE="${SUITE:-libero_10}"
+
+mkdir -p "$RAW_ROOT" "$HDF5_DEPTH_DIR" "$RLDS_OUT"
+cd "$LFM4VLA_ROOT"
+
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate "$CONDA_ENV_SIM"
+
+export PYTHONUNBUFFERED=1
+export MUJOCO_GL="${MUJOCO_GL:-egl}"
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+
+echo "=== LIBERO depth RLDS build ==="
+echo "job=${SLURM_JOB_ID:-local}"
+echo "RAW_DIR=$RAW_DIR"
+echo "HDF5_DEPTH_DIR=$HDF5_DEPTH_DIR"
+echo "RLDS_OUT=$RLDS_OUT"
+
+# ---------------------------------------------------------------------------
+# 1) Download raw LIBERO HDF5
+# ---------------------------------------------------------------------------
+if [[ -z "$(ls -A "$RAW_DIR/$SUITE"/*.hdf5 2>/dev/null || true)" ]]; then
+  echo "[1/3] Downloading yifengzhu-hf/LIBERO-datasets → $RAW_DIR"
+  pip install -q "huggingface_hub[cli]" || true
+  huggingface-cli download yifengzhu-hf/LIBERO-datasets \
+    --repo-type dataset \
+    --local-dir "$RAW_DIR"
+else
+  echo "[1/3] Raw HDF5 already present: $RAW_DIR/$SUITE — skip download"
+fi
+
+if [[ -z "$(ls -A "$RAW_DIR/$SUITE"/*.hdf5 2>/dev/null || true)" ]]; then
+  echo "ERROR: no demos at $RAW_DIR/$SUITE/*.hdf5" >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 2) Replay with depth → HDF5
+# ---------------------------------------------------------------------------
+if [[ -z "$(ls -A "$HDF5_DEPTH_DIR"/*.hdf5 2>/dev/null || true)" ]]; then
+  echo "[2/3] Regenerating HDF5 with agentview_depth → $HDF5_DEPTH_DIR"
+  srun python scripts/regenerate_libero_hdf5_with_depth.py \
+    --libero_task_suite "$SUITE" \
+    --libero_raw_data_dir "$RAW_DIR/$SUITE" \
+    --libero_target_dir "$HDF5_DEPTH_DIR"
+else
+  echo "[2/3] Depth HDF5 already present: $HDF5_DEPTH_DIR — skip regenerate"
+fi
+
+# ---------------------------------------------------------------------------
+# 3) HDF5 → RLDS
+# ---------------------------------------------------------------------------
+echo "[3/3] Converting to RLDS → $RLDS_OUT/libero_10_no_noops"
+conda activate "$CONDA_ENV_RLDS"
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+export CUDA_VISIBLE_DEVICES=""
+export TFDS_DATA_DIR="$RLDS_OUT"
+export LIBERO_DEPTH_HDF5_GLOB="$HDF5_DEPTH_DIR/*.hdf5"
+
+python - <<'PY'
+import importlib
+for m in ("tensorflow", "tensorflow_datasets", "h5py", "numpy"):
+    importlib.import_module(m)
+print("TFDS deps OK")
+PY
+
+BUILDER_DIR="$LFM4VLA_ROOT/scripts/rlds_builders/libero_10_no_noops"
+cd "$BUILDER_DIR"
+srun env \
+  CUDA_VISIBLE_DEVICES= \
+  TFDS_DATA_DIR="$RLDS_OUT" \
+  LIBERO_DEPTH_HDF5_GLOB="$LIBERO_DEPTH_HDF5_GLOB" \
+  tfds build --overwrite
+
+echo "=== DONE ==="
+echo "RLDS root: $RLDS_OUT"
+find "$RLDS_OUT" -maxdepth 3 -type d | head -40
+echo
+echo "Next — 8-run depth sweep (1 GPU per array index 0..7):"
+echo "  sbatch --dependency=afterok:${SLURM_JOB_ID} \\"
+echo "    --export=ALL,CONFIG=configs/lfm2.5-vl-450m-libero-depth-latent1.json \\"
+echo "    scripts/train_lfm_libero_depth_sweep.sbatch"
