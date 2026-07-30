@@ -18,6 +18,9 @@
 #   sbatch scripts/train_lfm_he_token_sweep.sbatch
 #   CONFIG=configs/lfm2.5-vl-1.6b-humanoid-everyday.json sbatch scripts/train_lfm_he_token_sweep.sbatch
 #   # subset: sbatch --array=0-4 scripts/train_lfm_he_token_sweep.sbatch
+#
+# One-time env pin (HE download can pull NumPy 2.x, which breaks older wandb):
+#   pip install "numpy==1.26.4"
 
 set -euo pipefail
 
@@ -28,6 +31,18 @@ CONFIG="${CONFIG:-configs/lfm2.5-vl-450m-humanoid-everyday.json}"
 cd "$LFM4VLA_ROOT"
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV"
+
+# Guard: wandb + TF stack in this env expect NumPy 1.x (np.float_ removed in 2.0).
+python - <<'PY'
+import numpy as np
+maj = int(np.__version__.split(".", 1)[0])
+if maj >= 2:
+    raise SystemExit(
+        f"NumPy {np.__version__} is incompatible with this env's wandb/TF pins.\n"
+        "  pip install 'numpy==1.26.4'\n"
+        "Then re-submit the job."
+    )
+PY
 
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
