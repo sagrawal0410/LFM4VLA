@@ -57,6 +57,22 @@ conda install -y -c conda-forge "mesalib<=25.1.0" libegl-devel glew || true
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
 export LIBGL_DRIVERS_PATH="${CONDA_PREFIX}/lib/dri:${LIBGL_DRIVERS_PATH:-}"
 
+# robosuite 1.4.x breaks on mujoco>=3.1.0 (mj_fullM signature change).
+# Pin to the LIBERO-community versions used by scripts/install_libero_sim.sh.
+python - <<'PY'
+import importlib.metadata as m
+try:
+    v = m.version("mujoco")
+except m.PackageNotFoundError:
+    v = None
+print(f"mujoco version before pin: {v}")
+PY
+pip install -q "mujoco==3.3.2" "robosuite==1.4.1"
+python - <<'PY'
+import mujoco, robosuite
+print(f"mujoco={mujoco.__version__} robosuite={robosuite.__version__}")
+PY
+
 # ---------------------------------------------------------------------------
 # 1) Download raw LIBERO HDF5
 # ---------------------------------------------------------------------------
