@@ -1,0 +1,10 @@
+name: lfm4vla-he
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  # Prefer: bash scripts/install_humanoid_everyday_env.sh
+  # (clones lfm4vla so AMD/ROCm torch matches the cluster).
+  # This yml is a lightweight marker for export_conda_envs.sh / docs.

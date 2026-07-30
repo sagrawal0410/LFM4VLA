@@ -9,15 +9,11 @@
 
 set -euo pipefail
 
-# Humanoid Everyday fine-tune (pick/place, push/pull, stack/align, pour) — G1 28-D.
-# Prerequisite: download the subset once on a login node:
-#   python scripts/download_humanoid_everyday.py \
-#       --output_dir /home/teams/research/robotics/humanoid_everyday
-#   pip install av pyarrow huggingface_hub
+# Humanoid Everyday fine-tune (1.6B) — G1 28-D.
+# Env: bash scripts/install_humanoid_everyday_env.sh  →  conda activate lfm4vla-he
 
-# --- edit these for your cluster layout ---
 LFM4VLA_ROOT="${LFM4VLA_ROOT:-$HOME/LFM4VLA}"
-CONDA_ENV="${CONDA_ENV:-lfm4vla}"
+CONDA_ENV="${CONDA_ENV:-lfm4vla-he}"
 CONFIG="${CONFIG:-configs/lfm2.5-vl-1.6b-humanoid-everyday.json}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -26,6 +22,16 @@ cd "$LFM4VLA_ROOT"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV"
+
+python - <<'PY'
+import numpy as np, sys
+if int(np.__version__.split(".", 1)[0]) >= 2:
+    raise SystemExit(
+        f"Env '{sys.prefix}' has NumPy {np.__version__}. "
+        "Use lfm4vla-he (bash scripts/install_humanoid_everyday_env.sh)."
+    )
+print(f"[he] env={sys.prefix} numpy={np.__version__}")
+PY
 
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false

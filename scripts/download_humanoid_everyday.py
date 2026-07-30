@@ -8,10 +8,9 @@ Fetches, from the LeRobot-format HF dataset (default ``USC-GVL/humanoid-everyday
 Episodes are selected by skill keywords in the task name (pick/place, push/pull,
 stack/align, pour by default) and robot type (G1 by default, 28-D actions).
 
-Requires: pip install huggingface_hub pyarrow av
-
-After install, re-pin NumPy if anything pulled 2.x (breaks wandb/TF in lfm4vla):
-    pip install "numpy==1.26.4"
+Preferred env (NumPy 1.26 pin; leaves ``lfm4vla`` free for NumPy 2.x work):
+    bash scripts/install_humanoid_everyday_env.sh
+    conda activate lfm4vla-he
 
 Usage (cluster login node or workstation):
     python scripts/download_humanoid_everyday.py \

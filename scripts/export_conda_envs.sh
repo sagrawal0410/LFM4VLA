@@ -6,6 +6,7 @@
 # Recreate elsewhere:
 #   conda env create -f envs/lfm4vla-libero.yml
 #   bash scripts/install_libero_rlds_deps.sh   # for LIBERO TF/protobuf pins
+#   bash scripts/install_humanoid_everyday_env.sh   # HE (NumPy 1.26 pin)
 
 set -euo pipefail
 
@@ -24,7 +25,7 @@ export_env() {
   conda run -n "$name" pip freeze > "$OUT/${name}-pip-freeze.txt"
 }
 
-for env in lfm4vla lfm4vla-libero calvin_eval env_isaaclab; do
+for env in lfm4vla lfm4vla-libero lfm4vla-he calvin_eval env_isaaclab; do
   export_env "$env"
 done
 
