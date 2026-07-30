@@ -58,6 +58,7 @@ def write_configs(base_config: Path, out_dir: Path) -> None:
     for idx, n_tok, lat, total in grid():
         cfg = json.loads(json.dumps(base))  # deep copy via JSON
         cfg["task_name"] = f"{base.get('task_name', 'he')}_tok{n_tok}_lat{lat}"
+        cfg["wandb_project"] = "lfm4vla_he"
         cfg.setdefault("act_head", {})
         cfg["act_head"]["type"] = "FCContinuousDecoder"
         cfg["act_head"]["action_dim"] = 28

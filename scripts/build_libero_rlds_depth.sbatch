@@ -52,11 +52,27 @@ echo "RLDS_OUT=$RLDS_OUT"
 # 1) Download raw LIBERO HDF5
 # ---------------------------------------------------------------------------
 if [[ -z "$(ls -A "$RAW_DIR/$SUITE"/*.hdf5 2>/dev/null || true)" ]]; then
-  echo "[1/3] Downloading yifengzhu-hf/LIBERO-datasets → $RAW_DIR"
-  pip install -q "huggingface_hub[cli]" || true
-  huggingface-cli download yifengzhu-hf/LIBERO-datasets \
-    --repo-type dataset \
-    --local-dir "$RAW_DIR"
+  echo "[1/3] Downloading yifengzhu-hf/LIBERO-datasets/$SUITE → $RAW_DIR"
+  # Newer huggingface_hub removed working `huggingface-cli`; prefer `hf` or Python API.
+  pip install -q -U "huggingface_hub>=0.26"
+  # Only pull the suite we need (libero_10), not the full ~100GB dump.
+  if command -v hf >/dev/null 2>&1; then
+    hf download yifengzhu-hf/LIBERO-datasets \
+      --repo-type dataset \
+      --include "${SUITE}/*" \
+      --local-dir "$RAW_DIR"
+  else
+    python - <<PY
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id="yifengzhu-hf/LIBERO-datasets",
+    repo_type="dataset",
+    local_dir="${RAW_DIR}",
+    allow_patterns=["${SUITE}/*"],
+)
+print("download complete")
+PY
+  fi
 else
   echo "[1/3] Raw HDF5 already present: $RAW_DIR/$SUITE — skip download"
 fi

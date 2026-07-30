@@ -31,7 +31,7 @@
     "output_root": "runs/checkpoints",
     "log_root": "runs/logs",
     "cache_root": "runs/cache",
-    "wandb_project": "lfm4vla",
+    "wandb_project": "lfm4vla_he",
     "model_load_path": null,
     "model_load_source": "torch",
     "resume": null,
