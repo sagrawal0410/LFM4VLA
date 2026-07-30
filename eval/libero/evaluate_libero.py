@@ -232,7 +232,8 @@ def _make_env(task, resolution: int = 256, live_render: bool = False):
     ``MUJOCO_GL=glfw``). Policy still reads offscreen ``agentview`` frames.
     """
     from libero.libero import get_libero_path
-    from libero.libero.envs import ControlEnv, OffScreenRenderEnv
+    # OffScreenRenderEnv is re-exported; ControlEnv lives in env_wrapper only.
+    from libero.libero.envs import OffScreenRenderEnv
 
     task_bddl = os.path.join(
         get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
@@ -243,8 +244,11 @@ def _make_env(task, resolution: int = 256, live_render: bool = False):
         "camera_widths": resolution,
     }
     if live_render:
-        # ControlEnv defaults: has_renderer=False, has_offscreen_renderer=True.
+        # ControlEnv is not in libero.libero.envs.__init__; import from wrapper.
+        # Defaults: has_renderer=False, has_offscreen_renderer=True.
         # Turn on the window while keeping offscreen cameras for the policy.
+        from libero.libero.envs.env_wrapper import ControlEnv
+
         env = ControlEnv(
             has_renderer=True,
             has_offscreen_renderer=True,
