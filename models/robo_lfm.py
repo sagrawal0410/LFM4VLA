@@ -91,7 +91,8 @@ class RoboLFM25VL(RoboVLMBackbone):
 
         def _pil_to_chw(img: Image.Image) -> torch.Tensor:
             img = img.convert("RGB")
-            return torch.from_numpy(np.array(img, copy=False)).permute(2, 0, 1).float()
+            # copy=True: PIL/NumPy buffers are often non-writable; PyTorch warns otherwise.
+            return torch.from_numpy(np.array(img, copy=True)).permute(2, 0, 1).float()
 
         return _pil_to_chw
 

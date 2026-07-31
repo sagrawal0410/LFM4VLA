@@ -42,6 +42,12 @@ export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
+_MIOPEN_BASE="${TMPDIR:-/tmp}/miopen_${USER}_${SLURM_JOB_ID:-$$}"
+mkdir -p "$_MIOPEN_BASE"
+export MIOPEN_USER_DB_PATH="$_MIOPEN_BASE"
+export MIOPEN_CUSTOM_CACHE_DIR="$_MIOPEN_BASE"
+echo "[he-depth] MIOPEN_USER_DB_PATH=${MIOPEN_USER_DB_PATH}"
+
 echo "config=${CONFIG}  output_root=${OUTPUT_ROOT}"
 
 srun --cpu-bind=none python main.py \

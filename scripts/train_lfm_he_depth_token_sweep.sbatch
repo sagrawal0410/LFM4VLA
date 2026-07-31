@@ -75,6 +75,15 @@ export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
+# MIOpen: array jobs racing on ~/.config/miopen corrupt the SQLite kernel DB
+# ("database disk image is malformed" → miopenStatusInternalError on Conv2d).
+# Give every task its own cache under local /tmp (or SLURM TMPDIR).
+_MIOPEN_BASE="${TMPDIR:-/tmp}/miopen_${USER}_${SLURM_JOB_ID:-$$}_${SLURM_ARRAY_TASK_ID:-0}"
+mkdir -p "$_MIOPEN_BASE"
+export MIOPEN_USER_DB_PATH="$_MIOPEN_BASE"
+export MIOPEN_CUSTOM_CACHE_DIR="$_MIOPEN_BASE"
+echo "[he-depth] MIOPEN_USER_DB_PATH=${MIOPEN_USER_DB_PATH}"
+
 if [[ -z "${NUM_ACTION_TOKENS:-}" || -z "${LATENT:-}" ]]; then
   if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     echo "[he-depth] ERROR: SLURM_ARRAY_TASK_ID unset and NUM_ACTION_TOKENS/LATENT not provided" >&2
