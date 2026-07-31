@@ -92,6 +92,9 @@ def _generate_examples(paths) -> Iterator[Tuple[str, Any]]:
 
 
 class Libero10NoNoops(tfds.core.GeneratorBasedBuilder):
+    # CamelCase ``Libero10NoNoops`` would become ``libero10_no_noops``; force the
+    # OpenVLA / OXE name used by configs (``libero_10_no_noops``).
+    name = "libero_10_no_noops"
     VERSION = tfds.core.Version("1.0.0")
     RELEASE_NOTES = {"1.0.0": "LIBERO-10 with agentview GT depth."}
 

@@ -46,6 +46,11 @@ def main() -> None:
     spec.loader.exec_module(mod)
 
     builder = mod.Libero10NoNoops(data_dir=data_dir)
+    if builder.name != "libero_10_no_noops":
+        raise RuntimeError(
+            f"builder.name={builder.name!r}; expected 'libero_10_no_noops' "
+            "(set GeneratorBasedBuilder.name explicitly)"
+        )
 
     # Match ``tfds build --overwrite``.
     version_dir = Path(data_dir) / builder.name / str(builder.VERSION)
