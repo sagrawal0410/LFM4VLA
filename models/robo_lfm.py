@@ -344,7 +344,7 @@ class RoboLFM25VL(RoboVLMBackbone):
 
         input_embeds = self.word_embedding(input_ids)
         if self.use_depth and self.depth_conditioner is not None:
-            input_embeds, image_tokens, _image_tok_mask = self._fuse_image_features(
+            input_embeds, image_tokens, image_tok_mask = self._fuse_image_features(
                 input_ids,
                 input_embeds,
                 pixel_values,
@@ -361,6 +361,7 @@ class RoboLFM25VL(RoboVLMBackbone):
                 pixel_attention_mask,
             )
             image_tokens = None
+            image_tok_mask = None
 
         multimodal_embeds = input_embeds
         multimodal_labels = None
@@ -375,17 +376,22 @@ class RoboLFM25VL(RoboVLMBackbone):
         # Depth CNN → QFormer (cross-attn over depth / image / text) → insert tokens.
         if self.use_depth and self.depth_conditioner is not None:
             depth_maps = self._resolve_depth_maps(vision_x, depth)
+            depth_maps = torch.nan_to_num(depth_maps.float(), nan=0.0, posinf=0.0, neginf=0.0)
+            depth_maps = depth_maps.clamp(0.0, 1.0)
             # Text tokens = non-image embeddings already in the sequence (instruction).
             text_mask = (input_ids != self.image_token_id)
             if multimodal_attention_mask is not None:
                 text_mask = text_mask & multimodal_attention_mask.bool()
             depth_tokens = self.depth_conditioner(
-                depth=depth_maps.to(dtype=multimodal_embeds.dtype, device=multimodal_embeds.device),
+                depth=depth_maps.to(device=multimodal_embeds.device),
                 image_tokens=image_tokens.to(dtype=multimodal_embeds.dtype),
                 text_tokens=multimodal_embeds,
                 text_mask=text_mask,
+                image_mask=image_tok_mask,
             )
             depth_tokens = depth_tokens.to(dtype=multimodal_embeds.dtype)
+            if not torch.isfinite(depth_tokens).all():
+                depth_tokens = torch.nan_to_num(depth_tokens, nan=0.0, posinf=0.0, neginf=0.0)
             multimodal_embeds, multimodal_labels, multimodal_attention_mask = (
                 self._insert_depth_tokens(
                     multimodal_embeds, multimodal_attention_mask, depth_tokens

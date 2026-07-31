@@ -75,6 +75,11 @@ def _extract_one(root_str: str, ep_idx: int, overwrite: bool) -> str:
     if arr.ndim != 3:
         raise ValueError(f"ep {ep_idx}: unexpected depth shape {arr.shape}")
 
+    # Sanitize before float16: values > 65504 become Inf and later min-max → NaN loss.
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    arr = np.where((arr > 0.0) & (arr < 1.0e5), arr, 0.0).astype(np.float32)
+    arr = np.clip(arr, 0.0, np.finfo(np.float16).max)
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".tmp.npy")
     np.save(tmp, arr.astype(np.float16))

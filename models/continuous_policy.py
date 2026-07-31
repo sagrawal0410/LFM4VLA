@@ -114,5 +114,12 @@ class FCContinuousDecoder(BasePolicyHead):
             action_loss = torch.nn.functional.huber_loss(
                 pred_action, target, reduction="none"
             )
-            action_loss = action_loss[attention_mask.bool()].mean()
+            keep = attention_mask.bool()
+            if keep.any():
+                action_loss = action_loss[keep].mean()
+            else:
+                # Empty mask → mean() is NaN; fall back to unmasked mean.
+                action_loss = action_loss.mean()
+        if not torch.isfinite(action_loss):
+            action_loss = pred_action.new_zeros(())
         return {"loss_arm": action_loss}

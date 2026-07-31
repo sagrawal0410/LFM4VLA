@@ -54,7 +54,9 @@ class DepthPatchEncoder(nn.Module):
         if depth.ndim != 4:
             raise ValueError(f"Expected depth [B,1,H,W], got {tuple(depth.shape)}")
 
-        feats = self.stem(depth.to(dtype=next(self.parameters()).dtype))  # [B, C, h, w]
+        # Caller (DepthConditioner) disables autocast; keep compute in fp32.
+        depth = torch.nan_to_num(depth.float(), nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
+        feats = self.stem(depth)  # [B, C, h, w]
         tokens = feats.flatten(2).transpose(1, 2)  # [B, N, C]
         return self.norm(self.proj(tokens))
 
@@ -107,7 +109,15 @@ class _QFormerLayer(nn.Module):
                 continue
             residual = queries
             q = norm(queries)
-            key_padding_mask = None if kv_mask is None else ~kv_mask.bool()
+            key_padding_mask = None
+            if kv_mask is not None:
+                keep = kv_mask.bool()
+                # PyTorch MHA returns NaN if a row masks out *all* keys.
+                if keep.any():
+                    keep = keep | (~keep.any(dim=-1, keepdim=True))
+                    key_padding_mask = ~keep
+                else:
+                    key_padding_mask = None
             attn_out, _ = cross_attn(
                 q, kv, kv, key_padding_mask=key_padding_mask, need_weights=False
             )
@@ -158,6 +168,7 @@ class MultimodalQFormer(nn.Module):
         image_tokens: torch.Tensor,
         text_tokens: Optional[torch.Tensor] = None,
         text_mask: Optional[torch.Tensor] = None,
+        image_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -165,20 +176,26 @@ class MultimodalQFormer(nn.Module):
             image_tokens: ``[B, Ni, D]``
             text_tokens:  ``[B, Nt, D]`` (optional)
             text_mask:    ``[B, Nt]`` bool/float attention mask (1=keep)
+            image_mask:   ``[B, Ni]`` bool mask for padded image tokens (1=keep)
         Returns:
             fused tokens ``[B, num_queries, D]``
         """
         bs = depth_tokens.shape[0]
+        # QFormer math in fp32 avoids bf16 softmax underflow → NaN on long KV sequences.
+        depth_tokens = depth_tokens.float()
+        image_tokens = image_tokens.float()
+        if text_tokens is not None:
+            text_tokens = text_tokens.float()
         queries = self.query_tokens.expand(bs, -1, -1).to(
-            dtype=depth_tokens.dtype, device=depth_tokens.device
+            dtype=torch.float32, device=depth_tokens.device
         )
 
         if self.fuse_text:
             kv_list = (depth_tokens, image_tokens, text_tokens)
-            kv_masks = (None, None, text_mask)
+            kv_masks = (None, image_mask, text_mask)
         else:
             kv_list = (depth_tokens, image_tokens)
-            kv_masks = (None, None)
+            kv_masks = (None, image_mask)
 
         for layer in self.layers:
             queries = layer(queries, kv_list, kv_masks)
@@ -217,6 +234,9 @@ class DepthConditioner(nn.Module):
             fuse_text=bool(qf_cfg.get("fuse_text", True)),
         )
         self.num_queries = self.qformer.num_queries
+        # Keep depth stack in fp32 even under Lightning bf16-mixed.
+        self.encoder = self.encoder.float()
+        self.qformer = self.qformer.float()
 
     def forward(
         self,
@@ -224,6 +244,7 @@ class DepthConditioner(nn.Module):
         image_tokens: torch.Tensor,
         text_tokens: torch.Tensor,
         text_mask: Optional[torch.Tensor] = None,
+        image_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -231,8 +252,20 @@ class DepthConditioner(nn.Module):
             image_tokens: ``[B, Ni, D]`` (scattered image features, or pooled)
             text_tokens: ``[B, Nt, D]``
             text_mask: ``[B, Nt]``
+            image_mask: ``[B, Ni]``
         Returns:
             ``[B, num_queries, D]``
         """
-        depth_tokens = self.encoder(depth)
-        return self.qformer(depth_tokens, image_tokens, text_tokens, text_mask)
+        out_dtype = image_tokens.dtype
+        device_type = "cuda" if depth.is_cuda else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            depth_tokens = self.encoder(depth.float())
+            fused = self.qformer(
+                depth_tokens,
+                image_tokens.float(),
+                text_tokens.float() if text_tokens is not None else None,
+                text_mask=text_mask,
+                image_mask=image_mask,
+            )
+            fused = torch.nan_to_num(fused.float(), nan=0.0, posinf=0.0, neginf=0.0)
+        return fused.to(dtype=out_dtype)

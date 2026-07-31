@@ -12,7 +12,7 @@
     "fwd_loss_ratio": 0,
     "seed": 123,
     "batch_size": 16,
-    "num_workers": 4,
+    "num_workers": 2,
     "data_scale": 1,
     "optimizer": "adam",
     "learning_rate": 2e-05,
@@ -116,7 +116,7 @@
         "data_mix": "libero_10_no_noops",
         "image_size": 224,
         "image_aug": true,
-        "shuffle_buffer_size": 51200,
+        "shuffle_buffer_size": 8192,
         "train": true,
         "load_depth": true
     },

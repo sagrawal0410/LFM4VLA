@@ -352,24 +352,38 @@ class HumanoidEverydayDataset(Dataset):
         return np.clip(out, self.norm_min, self.norm_max)
 
     def _prepare_depth(self, ep_idx: int, t: int, rgb: torch.Tensor) -> torch.Tensor:
-        """Return depth ``[window_size, 1, H, W]`` aligned to RGB spatial size."""
+        """Return depth ``[window_size, 1, H, W]`` aligned to RGB spatial size.
+
+        HE depth often has invalid pixels (0 / NaN / Inf / uint16 sentinels). Those
+        must be sanitized *before* min-max — otherwise Inf from float16 overflow
+        (values > 65504) turns the whole map into NaN and poisons training loss.
+        """
         # Copy one frame out of mmap/RAM so we don't keep a view into a huge array.
         frame = np.asarray(self._episode_depth(ep_idx)[t], dtype=np.float32)  # [H0, W0]
         if frame.ndim == 3:
             frame = frame[..., 0]
+        frame = np.nan_to_num(frame, nan=0.0, posinf=0.0, neginf=0.0)
+        # Drop non-positive / absurd depths (mm-scale RealSense is << 1e5).
+        frame = np.where((frame > 0.0) & (frame < 1.0e5), frame, 0.0).astype(np.float32)
+
         if self.depth_image_size is not None:
             target_hw = (self.depth_image_size, self.depth_image_size)
         else:
             target_hw = (int(rgb.shape[-2]), int(rgb.shape[-1]))
 
-        d = torch.from_numpy(frame).unsqueeze(0).unsqueeze(0)  # [1, 1, H0, W0]
+        d = torch.from_numpy(np.ascontiguousarray(frame)).unsqueeze(0).unsqueeze(0)
         if d.shape[-2:] != target_hw:
             d = F.interpolate(d, size=target_hw, mode="nearest")
-        # Per-frame min-max after resize (same spirit as LIBERO).
-        dmin = d.amin(dim=(-2, -1), keepdim=True)
-        dmax = d.amax(dim=(-2, -1), keepdim=True)
-        d = (d - dmin) / (dmax - dmin + 1e-6)
-        # window_size == 1 today; keep leading W dim for collater parity with LIBERO.
+
+        # Min-max over valid (>0) pixels only; constant/empty → zeros (finite).
+        valid = d > 0
+        if bool(valid.any()):
+            dmin = d.masked_fill(~valid, float("inf")).amin(dim=(-2, -1), keepdim=True)
+            dmax = d.masked_fill(~valid, float("-inf")).amax(dim=(-2, -1), keepdim=True)
+            d = torch.where(valid, (d - dmin) / (dmax - dmin + 1e-6), torch.zeros_like(d))
+        else:
+            d = torch.zeros_like(d)
+        d = torch.nan_to_num(d, nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
         return d  # [1, 1, H, W]
 
     # ------------------------------------------------------------------
