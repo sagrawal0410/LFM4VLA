@@ -4,9 +4,9 @@ Checks each episode's depth volume (``.npy`` preferred, parquet fallback) and
 reports how much of the data is usable under the same rules used by training
 (``HumanoidEverydayDataset._prepare_depth`` / ``extract_he_depth_arrays.py``):
 
-  valid pixel:   finite, ``0 < z < 1e5``
-  invalid:       ``<= 0`` (incl. missing / RealSense holes)
-  corrupted:     NaN, ±Inf, or ``>= 1e5`` (incl. float16-overflow sentinels)
+  valid pixel:   finite, ``0 < z < 10000`` (mm) and ``z < 60000``
+  invalid:       ``<= 0`` (RealSense holes)
+  corrupted:     NaN, ±Inf, ``z >= 10000``, or saturation ``z >= 60000``
 
 Usage:
     conda activate lfm4vla-he
@@ -37,6 +37,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from data.he_depth_utils import HE_DEPTH_MAX_MM, HE_DEPTH_SAT_FLOOR
 from data.humanoid_everyday_dataset import (
     DEPTH_COLUMN,
     SKILL_KEYWORDS,
@@ -46,7 +47,9 @@ from data.humanoid_everyday_dataset import (
 )
 
 FLOAT16_MAX = float(np.finfo(np.float16).max)  # 65504
-ABSURD_MAX = 1.0e5
+# Match training sanitizer: >10m (mm) or near-uint16 sat are not usable range.
+ABSURD_MAX = HE_DEPTH_MAX_MM
+SAT_FLOOR = HE_DEPTH_SAT_FLOOR
 
 
 def _select_episodes(root: Path, skills, robot_type) -> List[int]:
@@ -126,11 +129,11 @@ def _audit_array(arr: np.ndarray) -> Dict[str, Any]:
     nan_m = np.isnan(flat)
     inf_m = np.isinf(flat)
     finite = np.isfinite(flat)
-    absurd_m = finite & (flat >= ABSURD_MAX)
+    absurd_m = finite & ((flat >= ABSURD_MAX) | (flat >= SAT_FLOOR))
     nonpos_m = finite & (flat <= 0.0)
     # Would become Inf if cast to float16 without clipping.
-    f16_risk = finite & (flat > FLOAT16_MAX) & (flat < ABSURD_MAX)
-    valid_m = finite & (flat > 0.0) & (flat < ABSURD_MAX)
+    f16_risk = finite & (flat > FLOAT16_MAX) & (flat < SAT_FLOOR)
+    valid_m = finite & (flat > 0.0) & (flat < ABSURD_MAX) & (flat < SAT_FLOOR)
 
     n_nan = int(nan_m.sum())
     n_inf = int(inf_m.sum())
@@ -146,8 +149,9 @@ def _audit_array(arr: np.ndarray) -> Dict[str, Any]:
     f_nan = np.isnan(frame).reshape(t, -1)
     f_inf = np.isinf(frame).reshape(t, -1)
     f_fin = np.isfinite(frame).reshape(t, -1)
-    f_val = (f_fin & (frame.reshape(t, -1) > 0.0) & (frame.reshape(t, -1) < ABSURD_MAX))
-    f_corrupt = f_nan | f_inf | (f_fin & (frame.reshape(t, -1) >= ABSURD_MAX))
+    flat_f = frame.reshape(t, -1)
+    f_val = f_fin & (flat_f > 0.0) & (flat_f < ABSURD_MAX) & (flat_f < SAT_FLOOR)
+    f_corrupt = f_nan | f_inf | (f_fin & ((flat_f >= ABSURD_MAX) | (flat_f >= SAT_FLOOR)))
     valid_frac_f = f_val.mean(axis=1)
     corrupt_frac_f = f_corrupt.mean(axis=1)
 
@@ -181,10 +185,10 @@ def _audit_array(arr: np.ndarray) -> Dict[str, Any]:
 
 
 def _classify_episode(stats: Dict[str, Any]) -> str:
-    """Coarse episode label for triage."""
+    """Coarse episode label for triage (frac-based; ignore sparse Inf speckles)."""
     if stats["num_pixels"] == 0:
         return "empty"
-    if stats["corrupted_frac"] >= 0.01 or stats["corrupted_nan"] or stats["corrupted_inf"]:
+    if stats["corrupted_frac"] >= 0.01:
         return "corrupted"
     if stats["valid_frac"] < 0.1:
         return "mostly_invalid"
@@ -192,6 +196,8 @@ def _classify_episode(stats: Dict[str, Any]) -> str:
         return "degraded"
     if stats["float16_overflow_risk"] > 0:
         return "float16_risk"
+    if (stats.get("corrupted_inf") or 0) > 0 or (stats.get("corrupted_nan") or 0) > 0:
+        return "ok_sparse_corrupt"  # usable; speckles sanitized at train time
     return "ok"
 
 
