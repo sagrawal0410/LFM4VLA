@@ -160,41 +160,12 @@ export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-2}"
 export TFDS_DATA_DIR="$RLDS_OUT"
 export LIBERO_DEPTH_HDF5_GLOB="$HDF5_DEPTH_DIR/*.hdf5"
 
-# Re-pin in case this env differs from CONDA_ENV_SIM or pip drifted.
-python - <<'PY'
-import importlib.metadata as m
-import subprocess
-import sys
+# Pin NumPy 1.x, OpenCV 4.x, install apache-beam if needed (tfds CLI), verify imports.
+cd "$LFM4VLA_ROOT"
+python scripts/ensure_libero_rlds_build_deps.py
 
-def ver(pkg):
-    try:
-        return m.version(pkg)
-    except m.PackageNotFoundError:
-        return "0"
-
-v = ver("numpy")
-if int(v.split(".", 1)[0]) >= 2:
-    print(f"[libero] NumPy {v} incompatible with TF; pinning 1.26.4", flush=True)
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "-q", "--no-cache-dir", "numpy==1.26.4"]
-    )
-    v = ver("numpy")
-print(f"[libero] numpy={v}", flush=True)
-if int(v.split(".", 1)[0]) >= 2:
-    raise SystemExit("NumPy still >=2 after pin; fix the conda env manually.")
-PY
-
-python - <<'PY'
-import importlib
-for m in ("tensorflow", "tensorflow_datasets", "h5py", "numpy"):
-    importlib.import_module(m)
-print("TFDS deps OK")
-PY
-
-BUILDER_DIR="$LFM4VLA_ROOT/scripts/rlds_builders/libero_10_no_noops"
-cd "$BUILDER_DIR"
-# Avoid `srun env` — some nodes resolve a broken ~/.local/bin/env.
-srun tfds build --overwrite
+# Use Python API (not ``tfds`` CLI) — CLI imports apache_beam even for non-Beam builders.
+srun python scripts/build_libero_depth_tfds.py
 
 echo "=== DONE ==="
 echo "RLDS root: $RLDS_OUT"

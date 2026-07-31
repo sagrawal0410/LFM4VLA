@@ -21,6 +21,13 @@ tensorflow-graphics==2021.12.3
 absl-py
 rich
 tqdm
+# tfds CLI imports beam even for non-Beam builders; keep for ``tfds build``.
+apache-beam==2.54.0
+# OpenCV 5.x requires NumPy>=2; pin 4.x for TF/dlimp (NumPy 1.26).
+opencv-python==4.10.0.84
+opencv-python-headless==4.10.0.84
 
 # dlimp is not on PyPI; install separately:
 #   pip install --no-deps --force-reinstall git+https://github.com/moojink/dlimp_openvla
+# After any pip that may upgrade NumPy, re-pin:
+#   pip install --force-reinstall --no-deps "numpy==1.26.4"

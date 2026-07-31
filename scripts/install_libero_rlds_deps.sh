@@ -35,13 +35,16 @@ pip install --no-cache-dir --no-deps \
 pip install --no-cache-dir \
   "ml-dtypes>=0.2.0,<0.4.0" \
   "tensorflow-graphics==2021.12.3" \
-  "absl-py" "rich" "tqdm"
+  "absl-py" "rich" "tqdm" \
+  "apache-beam==2.54.0" \
+  "opencv-python==4.10.0.84" \
+  "opencv-python-headless==4.10.0.84"
 pip install --no-cache-dir --no-deps --force-reinstall \
   git+https://github.com/moojink/dlimp_openvla
 
-# Re-pin protobuf + metadata last in case a dep pulled newer ones.
+# Re-pin last: Beam/OpenCV may pull NumPy 2.x; TF 2.15 needs NumPy 1.x.
 pip install --no-cache-dir --force-reinstall --no-deps \
-  "protobuf==3.20.3" "tensorflow-metadata==1.14.0"
+  "numpy==1.26.4" "protobuf==3.20.3" "tensorflow-metadata==1.14.0"
 
 echo "=== 3. Verify ==="
 python - <<'PY'
