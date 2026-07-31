@@ -57,6 +57,9 @@ def write_configs(base_config: Path, out_dir: Path) -> None:
     for idx, lat, nq in grid():
         cfg = json.loads(json.dumps(base))  # deep copy
         cfg["use_depth"] = True
+        cfg["output_root"] = "/home/teams/research/robotics/checkpoints"
+        cfg["log_root"] = "/home/teams/research/robotics/logs"
+        cfg["cache_root"] = "/home/teams/research/robotics/cache"
         cfg.setdefault("depth", {}).setdefault("qformer", {})
         cfg["depth"]["qformer"]["num_queries"] = nq
         cfg.setdefault("act_head", {})

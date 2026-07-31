@@ -63,6 +63,9 @@ def write_configs(base_config: Path, out_dir: Path) -> None:
         cfg = json.loads(json.dumps(base))  # deep copy via JSON
         cfg["task_name"] = f"{base.get('task_name', 'he')}_tok{n_tok}_lat{lat}"
         cfg["wandb_project"] = "lfm4vla_he"
+        cfg["output_root"] = "/home/teams/research/robotics/checkpoints"
+        cfg["log_root"] = "/home/teams/research/robotics/logs"
+        cfg["cache_root"] = "/home/teams/research/robotics/cache"
         cfg.setdefault("act_head", {})
         cfg["act_head"]["type"] = "FCContinuousDecoder"
         cfg["act_head"]["action_dim"] = 28

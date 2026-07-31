@@ -75,9 +75,28 @@ def ver(pkg):
 print(f"mujoco version before pin: {ver('mujoco')}")
 PY
 pip install -q "mujoco==3.3.2" "robosuite==1.4.1"
+# mujoco/pip may pull NumPy 2.x; TF / tfds / dlimp require NumPy 1.x.
 python - <<'PY'
 import importlib.metadata as m
-print(f"mujoco={m.version('mujoco')} robosuite={m.version('robosuite')}")
+import subprocess
+import sys
+
+def ver(pkg):
+    try:
+        return m.version(pkg)
+    except m.PackageNotFoundError:
+        return "0"
+
+v = ver("numpy")
+if int(v.split(".", 1)[0]) >= 2:
+    print(f"[libero] NumPy {v} incompatible with TF; pinning 1.26.4", flush=True)
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "-q", "--no-cache-dir", "numpy==1.26.4"]
+    )
+    v = ver("numpy")
+print(f"mujoco={ver('mujoco')} robosuite={ver('robosuite')} numpy={v}", flush=True)
+if int(v.split(".", 1)[0]) >= 2:
+    raise SystemExit("NumPy still >=2 after pin; fix the conda env manually.")
 PY
 
 # ---------------------------------------------------------------------------
@@ -137,8 +156,33 @@ echo "[3/3] Converting to RLDS → $RLDS_OUT/libero_10_no_noops"
 conda activate "$CONDA_ENV_RLDS"
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
 export CUDA_VISIBLE_DEVICES=""
+export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-2}"
 export TFDS_DATA_DIR="$RLDS_OUT"
 export LIBERO_DEPTH_HDF5_GLOB="$HDF5_DEPTH_DIR/*.hdf5"
+
+# Re-pin in case this env differs from CONDA_ENV_SIM or pip drifted.
+python - <<'PY'
+import importlib.metadata as m
+import subprocess
+import sys
+
+def ver(pkg):
+    try:
+        return m.version(pkg)
+    except m.PackageNotFoundError:
+        return "0"
+
+v = ver("numpy")
+if int(v.split(".", 1)[0]) >= 2:
+    print(f"[libero] NumPy {v} incompatible with TF; pinning 1.26.4", flush=True)
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "-q", "--no-cache-dir", "numpy==1.26.4"]
+    )
+    v = ver("numpy")
+print(f"[libero] numpy={v}", flush=True)
+if int(v.split(".", 1)[0]) >= 2:
+    raise SystemExit("NumPy still >=2 after pin; fix the conda env manually.")
+PY
 
 python - <<'PY'
 import importlib
@@ -149,11 +193,8 @@ PY
 
 BUILDER_DIR="$LFM4VLA_ROOT/scripts/rlds_builders/libero_10_no_noops"
 cd "$BUILDER_DIR"
-srun env \
-  CUDA_VISIBLE_DEVICES= \
-  TFDS_DATA_DIR="$RLDS_OUT" \
-  LIBERO_DEPTH_HDF5_GLOB="$LIBERO_DEPTH_HDF5_GLOB" \
-  tfds build --overwrite
+# Avoid `srun env` — some nodes resolve a broken ~/.local/bin/env.
+srun tfds build --overwrite
 
 echo "=== DONE ==="
 echo "RLDS root: $RLDS_OUT"

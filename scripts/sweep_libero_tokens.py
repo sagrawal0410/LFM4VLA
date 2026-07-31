@@ -48,6 +48,9 @@ def write_configs(base_config: Path, out_dir: Path) -> None:
         cfg = json.loads(json.dumps(base))  # deep copy
         cfg.pop("use_depth", None)
         cfg.pop("depth", None)
+        cfg["output_root"] = "/home/teams/research/robotics/checkpoints"
+        cfg["log_root"] = "/home/teams/research/robotics/logs"
+        cfg["cache_root"] = "/home/teams/research/robotics/cache"
         cfg.setdefault("act_head", {})
         cfg["act_head"]["type"] = "FCDecoder"
         cfg["act_head"]["num_action_tokens"] = n_tok

@@ -15,6 +15,9 @@ set -euo pipefail
 LFM4VLA_ROOT="${LFM4VLA_ROOT:-$HOME/LFM4VLA}"
 CONDA_ENV="${CONDA_ENV:-lfm4vla-he}"
 CONFIG="${CONFIG:-configs/lfm2.5-vl-1.6b-humanoid-everyday.json}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/home/teams/research/robotics/checkpoints}"
+LOG_ROOT="${LOG_ROOT:-/home/teams/research/robotics/logs}"
+CACHE_ROOT="${CACHE_ROOT:-/home/teams/research/robotics/cache}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
@@ -36,4 +39,8 @@ PY
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 
-srun python main.py --config "$CONFIG"
+srun python main.py \
+  --config "$CONFIG" \
+  --output_root "$OUTPUT_ROOT" \
+  --log_root "$LOG_ROOT" \
+  --cache_root "$CACHE_ROOT"

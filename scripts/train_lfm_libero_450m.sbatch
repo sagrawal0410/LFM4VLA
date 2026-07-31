@@ -13,6 +13,9 @@ set -euo pipefail
 LFM4VLA_ROOT="${LFM4VLA_ROOT:-$HOME/LFM4VLA}"
 CONDA_ENV="${CONDA_ENV:-lfm4vla}"
 CONFIG="${CONFIG:-configs/lfm2.5-vl-450m-libero.json}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/home/teams/research/robotics/checkpoints}"
+LOG_ROOT="${LOG_ROOT:-/home/teams/research/robotics/logs}"
+CACHE_ROOT="${CACHE_ROOT:-/home/teams/research/robotics/cache}"
 
 # LIBERO streams RLDS through TensorFlow; keep TF off the GPU (PyTorch owns it).
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -32,4 +35,9 @@ export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 
 # LIBERO is a single-GPU streaming pipeline (RLDS stream is not rank-sharded).
-srun python main.py --config "$CONFIG"
+# Checkpoints: /home/teams/research/robotics/checkpoints/<YYYY-MM-DD>/<exp>/
+srun python main.py \
+  --config "$CONFIG" \
+  --output_root "$OUTPUT_ROOT" \
+  --log_root "$LOG_ROOT" \
+  --cache_root "$CACHE_ROOT"

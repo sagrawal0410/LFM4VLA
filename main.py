@@ -16,6 +16,12 @@ def parse_args():
                         help="Override depth.qformer.num_queries (fused tokens into LLM)")
     parser.add_argument("--task_name", type=str, default=None,
                         help="Override top-level task_name (used in run dirs / wandb)")
+    parser.add_argument("--output_root", type=str, default=None,
+                        help="Override checkpoint root (runs go under <output_root>/<date>/...)")
+    parser.add_argument("--log_root", type=str, default=None,
+                        help="Override log root (runs go under <log_root>/<date>/...)")
+    parser.add_argument("--cache_root", type=str, default=None,
+                        help="Override cache root")
     return vars(parser.parse_args())
 
 
@@ -33,6 +39,12 @@ def update_configs(configs, args):
         configs["use_depth"] = True
     if args.get("task_name"):
         configs["task_name"] = args["task_name"]
+    if args.get("output_root"):
+        configs["output_root"] = args["output_root"]
+    if args.get("log_root"):
+        configs["log_root"] = args["log_root"]
+    if args.get("cache_root"):
+        configs["cache_root"] = args["cache_root"]
     return configs
 
 

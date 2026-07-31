@@ -22,6 +22,10 @@ set -euo pipefail
 LFM4VLA_ROOT="${LFM4VLA_ROOT:-$HOME/LFM4VLA}"
 CONDA_ENV="${CONDA_ENV:-lfm4vla}"
 CONFIG="${CONFIG:-configs/lfm2.5-vl-450m-libero-depth-latent1.json}"
+# Checkpoints / logs land under <root>/<YYYY-MM-DD>/<exp_name>/
+OUTPUT_ROOT="${OUTPUT_ROOT:-/home/teams/research/robotics/checkpoints}"
+LOG_ROOT="${LOG_ROOT:-/home/teams/research/robotics/logs}"
+CACHE_ROOT="${CACHE_ROOT:-/home/teams/research/robotics/cache}"
 
 cd "$LFM4VLA_ROOT"
 source "$(conda info --base)/etc/profile.d/conda.sh"
@@ -39,9 +43,13 @@ TASK_NAME="${TASK_NAME:-libero_depth_lat${LATENT}_q${DEPTH_NUM_QUERIES}}"
 echo "=== LIBERO depth sweep ==="
 echo "array_id=${SLURM_ARRAY_TASK_ID:-n/a}  latent=${LATENT}  num_queries=${DEPTH_NUM_QUERIES}  task=${TASK_NAME}"
 echo "config=${CONFIG}"
+echo "output_root=${OUTPUT_ROOT}  log_root=${LOG_ROOT}"
 
 srun python main.py \
   --config "$CONFIG" \
   --latent "$LATENT" \
   --depth_num_queries "$DEPTH_NUM_QUERIES" \
-  --task_name "$TASK_NAME"
+  --task_name "$TASK_NAME" \
+  --output_root "$OUTPUT_ROOT" \
+  --log_root "$LOG_ROOT" \
+  --cache_root "$CACHE_ROOT"

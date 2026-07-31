@@ -25,6 +25,9 @@ set -euo pipefail
 LFM4VLA_ROOT="${LFM4VLA_ROOT:-$HOME/LFM4VLA}"
 CONDA_ENV="${CONDA_ENV:-lfm4vla-he}"
 CONFIG="${CONFIG:-configs/lfm2.5-vl-450m-humanoid-everyday.json}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/home/teams/research/robotics/checkpoints}"
+LOG_ROOT="${LOG_ROOT:-/home/teams/research/robotics/logs}"
+CACHE_ROOT="${CACHE_ROOT:-/home/teams/research/robotics/cache}"
 
 cd "$LFM4VLA_ROOT"
 source "$(conda info --base)/etc/profile.d/conda.sh"
@@ -58,4 +61,7 @@ srun python main.py \
   --config "$CONFIG" \
   --num_action_tokens "$NUM_ACTION_TOKENS" \
   --latent "$LATENT" \
-  --task_name "$TASK_NAME"
+  --task_name "$TASK_NAME" \
+  --output_root "$OUTPUT_ROOT" \
+  --log_root "$LOG_ROOT" \
+  --cache_root "$CACHE_ROOT"
