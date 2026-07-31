@@ -17,6 +17,8 @@
 #   python scripts/download_humanoid_everyday.py \
 #       --output_dir /home/teams/research/robotics/humanoid_everyday_depth \
 #       --include_depth
+#   # REQUIRED for speed (else ~minutes/step reading parquet depth):
+#   sbatch scripts/extract_he_depth_arrays.sbatch
 #
 # Env:
 #   bash scripts/install_humanoid_everyday_env.sh

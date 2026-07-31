@@ -20,6 +20,12 @@ Optional depth (``--include_depth`` download into a separate tree, e.g.
 ``load_depth=True``, each sample also returns ``depth`` as ``[W, 1, H, W]`` in
 ``[0, 1]`` (same contract as ``LiberoRLDSDataset``).
 
+**Performance:** for depth training, run
+``scripts/extract_he_depth_arrays.py`` once so each episode has
+``depths/chunk-XXX/episode_XXXXXX.npy`` (float16 ``[T,H,W]``). The loader mmaps
+those files. Reading depth from parquet on every random sample is extremely slow
+on shared NFS (minutes/step).
+
 Actions are absolute joint targets; every dim is normalized to [norm_min, norm_max]
 with q01/q99 bounds computed over the selected episodes (same idea as the RLDS
 BOUNDS_Q99 normalization used for LIBERO). Stats are cached under ``meta/`` so eval /
@@ -64,6 +70,18 @@ DEFAULT_SKILLS = ("pick_place", "push_pull", "stack_align", "pour")
 def task_matches_skills(task_name: str, skills: Sequence[str]) -> bool:
     t = task_name.lower()
     return any(kw in t for s in skills for kw in SKILL_KEYWORDS[s])
+
+
+def parquet_rel(ep_idx: int) -> str:
+    return f"data/chunk-{ep_idx // 1000:03d}/episode_{ep_idx:06d}.parquet"
+
+
+def video_rel(ep_idx: int) -> str:
+    return f"videos/chunk-{ep_idx // 1000:03d}/egocentric/episode_{ep_idx:06d}.mp4"
+
+
+def depth_npy_rel(ep_idx: int) -> str:
+    return f"depths/chunk-{ep_idx // 1000:03d}/episode_{ep_idx:06d}.npy"
 
 
 def load_meta(data_root_dir: str) -> Tuple[Dict[int, dict], List[dict]]:
@@ -182,27 +200,51 @@ class HumanoidEverydayDataset(Dataset):
         ]
 
         self._action_cache: "OrderedDict[int, np.ndarray]" = OrderedDict()
-        self._depth_cache: "OrderedDict[int, np.ndarray]" = OrderedDict()
+        self._depth_cache: "OrderedDict[int, Any]" = OrderedDict()
         self._video_cache: "OrderedDict[int, Any]" = OrderedDict()
         self._max_open_videos = max_open_videos
-        # Depth frames are large (~1 MB/frame at 480×640 float32); keep few episodes.
-        self._max_cached_depth_eps = 4
+        # mmap handles are cheap; keep many open under random frame sampling.
+        self._max_cached_depth_eps = 256
+        self._depth_from_npy = False
+
+        if self.load_depth:
+            n_npy = sum(
+                1 for ep in selected if self._depth_npy_path(ep["episode_index"]).is_file()
+            )
+            self._depth_from_npy = n_npy == len(selected)
+            if self._depth_from_npy:
+                depth_src = f"npy_mmap ({n_npy}/{len(selected)} episodes)"
+            elif n_npy == 0:
+                depth_src = (
+                    f"PARQUET-SLOW (0/{len(selected)} npy). Run: "
+                    f"python scripts/extract_he_depth_arrays.py --data_root {self.root}"
+                )
+                print(f"[HumanoidEveryday][WARN] {depth_src}")
+            else:
+                depth_src = (
+                    f"mixed npy={n_npy}/{len(selected)} (extract remaining for speed)"
+                )
+                print(f"[HumanoidEveryday][WARN] {depth_src}")
+        else:
+            depth_src = "off"
 
         n_frames = len(self.samples)
-        depth_msg = f" load_depth=True col={DEPTH_COLUMN}" if self.load_depth else ""
         print(f"[HumanoidEveryday] {'train' if train else 'val'}: "
               f"{len(selected)} episodes / {n_frames} frames | skills={list(skills)} "
-              f"robot={robot_type} action_dim={len(self.q01)} | stats={self.stats_path}"
-              f"{depth_msg}")
+              f"robot={robot_type} action_dim={len(self.q01)} | stats={self.stats_path} "
+              f"| depth={depth_src}")
 
     # ------------------------------------------------------------------
     # Paths (LeRobot v2.0 layout; chunks of 1000 episodes)
     # ------------------------------------------------------------------
     def _parquet_path(self, ep_idx: int) -> Path:
-        return self.root / f"data/chunk-{ep_idx // 1000:03d}/episode_{ep_idx:06d}.parquet"
+        return self.root / parquet_rel(ep_idx)
 
     def _video_path(self, ep_idx: int) -> Path:
-        return self.root / f"videos/chunk-{ep_idx // 1000:03d}/egocentric/episode_{ep_idx:06d}.mp4"
+        return self.root / video_rel(ep_idx)
+
+    def _depth_npy_path(self, ep_idx: int) -> Path:
+        return self.root / depth_npy_rel(ep_idx)
 
     def _assert_depth_available(self, ep_idx: int) -> None:
         import pyarrow.parquet as pq
@@ -269,8 +311,8 @@ class HumanoidEverydayDataset(Dataset):
             self._action_cache.popitem(last=False)
         return actions
 
-    def _read_depth_maps(self, ep_idx: int) -> np.ndarray:
-        """Return ``[T, H, W]`` float32 depth for one episode."""
+    def _read_depth_maps_parquet(self, ep_idx: int) -> np.ndarray:
+        """Slow path: load full episode depth column from parquet into RAM."""
         import pyarrow.parquet as pq
 
         table = pq.read_table(self._parquet_path(ep_idx), columns=[DEPTH_COLUMN])
@@ -286,10 +328,18 @@ class HumanoidEverydayDataset(Dataset):
         return arr
 
     def _episode_depth(self, ep_idx: int) -> np.ndarray:
+        """Return ``[T, H, W]`` depth (mmap float16 preferred, else float32 RAM)."""
         if ep_idx in self._depth_cache:
             self._depth_cache.move_to_end(ep_idx)
             return self._depth_cache[ep_idx]
-        depth = self._read_depth_maps(ep_idx)
+
+        npy_path = self._depth_npy_path(ep_idx)
+        if npy_path.is_file():
+            # mmap: random frame slices do not pull the whole episode into RAM.
+            depth = np.load(npy_path, mmap_mode="r")
+        else:
+            depth = self._read_depth_maps_parquet(ep_idx)
+
         self._depth_cache[ep_idx] = depth
         if len(self._depth_cache) > self._max_cached_depth_eps:
             self._depth_cache.popitem(last=False)
@@ -303,16 +353,16 @@ class HumanoidEverydayDataset(Dataset):
 
     def _prepare_depth(self, ep_idx: int, t: int, rgb: torch.Tensor) -> torch.Tensor:
         """Return depth ``[window_size, 1, H, W]`` aligned to RGB spatial size."""
-        frame = self._episode_depth(ep_idx)[t]  # [H0, W0]
+        # Copy one frame out of mmap/RAM so we don't keep a view into a huge array.
+        frame = np.asarray(self._episode_depth(ep_idx)[t], dtype=np.float32)  # [H0, W0]
+        if frame.ndim == 3:
+            frame = frame[..., 0]
         if self.depth_image_size is not None:
             target_hw = (self.depth_image_size, self.depth_image_size)
         else:
             target_hw = (int(rgb.shape[-2]), int(rgb.shape[-1]))
 
-        d = torch.from_numpy(np.asarray(frame, dtype=np.float32))
-        if d.ndim == 3:
-            d = d[..., 0]
-        d = d.unsqueeze(0).unsqueeze(0)  # [1, 1, H0, W0]
+        d = torch.from_numpy(frame).unsqueeze(0).unsqueeze(0)  # [1, 1, H0, W0]
         if d.shape[-2:] != target_hw:
             d = F.interpolate(d, size=target_hw, mode="nearest")
         # Per-frame min-max after resize (same spirit as LIBERO).

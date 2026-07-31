@@ -9,7 +9,6 @@ from data.build_dataset import build_dataset
 from train.base_trainer import BaseTrainer
 from train.experiment_utils import build_loggers, prepare_experiment
 from utils.dist_train import get_rank
-from utils.memory_monitor import MemoryMonitor
 from utils.setup_callback import SetupCallback
 
 
@@ -72,28 +71,29 @@ def _build_loader(dataset, variant, train: bool) -> DataLoader:
     main process): TensorFlow does not survive ``os.fork()``, so streaming the RLDS
     pipeline inside a forked DataLoader worker deadlocks (no batch is ever yielded).
     """
-    # Off switch for debugging host-RAM growth: ROCm's pinned-memory caching
-    # allocator is a known suspect for unbounded RSS growth on AMD clusters.
-    pin_memory = variant.get("pin_memory", True) and torch.cuda.is_available()
-
     if isinstance(dataset, IterableDataset):
         return DataLoader(
             dataset,
             batch_size=variant["batch_size"],
             num_workers=0,
-            pin_memory=pin_memory,
+            pin_memory=torch.cuda.is_available(),
             collate_fn=dataset.collater,
             drop_last=True,
         )
-    return DataLoader(
-        dataset,
+    num_workers = int(variant.get("num_workers", 4))
+    loader_kwargs = dict(
         batch_size=variant["batch_size"],
-        num_workers=variant.get("num_workers", 4),
-        pin_memory=pin_memory,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
         shuffle=train,
         collate_fn=dataset.collater,
         drop_last=train,
     )
+    # Keep HE / CALVIN workers warm across steps (big win when each sample seeks video).
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = int(variant.get("prefetch_factor", 4))
+    return DataLoader(dataset, **loader_kwargs)
 
 
 def experiment(variant):
@@ -121,7 +121,6 @@ def experiment(variant):
     callbacks = [
         SetupCallback(log_dir, ckpt_dir, variant, exp_name),
         LearningRateMonitor(logging_interval="step"),
-        MemoryMonitor(every_n_steps=variant.get("mem_log_every_n_steps", 50)),
         *_build_model_checkpoints(ckpt_dir, trainer_cfg),
     ]
 

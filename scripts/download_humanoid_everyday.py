@@ -20,6 +20,9 @@ RGB + depth (separate tree; parquet keeps ``observation.depth.egocentric``):
     python scripts/download_humanoid_everyday.py \\
         --output_dir /home/teams/research/robotics/humanoid_everyday_depth \\
         --include_depth
+    # Then extract memmap sidecars (required for usable training speed):
+    python scripts/extract_he_depth_arrays.py \\
+        --data_root /home/teams/research/robotics/humanoid_everyday_depth
 
 Resume-safe: already-downloaded episodes are skipped (depth downloads re-fetch a
 parquet that is missing the depth column).
@@ -247,6 +250,9 @@ def main() -> None:
         print("Re-run the same command to retry failed episodes (resume-safe).")
     print(f"\nPoint train_dataset.data_root_dir at: {out}")
     if args.include_depth:
+        print("Then extract depth .npy (do this before training — parquet random access is tiny):")
+        print(f"  python scripts/extract_he_depth_arrays.py --data_root {out}")
+        print("  # or: sbatch scripts/extract_he_depth_arrays.sbatch")
         print("Then (depth + Q-Former token sweep):")
         print("  sbatch scripts/train_lfm_he_depth_token_sweep.sbatch")
     else:
