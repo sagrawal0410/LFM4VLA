@@ -548,7 +548,9 @@ def make_interleaved_dataset(dataset_kwargs_list: List[Dict],
                              balance_weights: bool = False,
                              traj_transform_threads: Optional[int] = None,
                              traj_read_threads: Optional[int] = None,
-                             filter_langs=False) -> dl.DLataset:
+                             filter_langs=False,
+                             cache_shuffle_buffer: bool = False,
+                             cache_offset: int = 0) -> dl.DLataset:
     """
     Creates an interleaved dataset from list of dataset configs (kwargs). Returns a dataset of batched frames.
 
@@ -648,8 +650,16 @@ def make_interleaved_dataset(dataset_kwargs_list: List[Dict],
     # Interleave at the Frame Level
     dataset: dl.DLataset = dl.DLataset.sample_from_datasets(datasets, sample_weights)
 
-    # Validation =>> fix a single shuffle buffer of data and cache it in RAM; prevents gradual memory increase!
-    if not train:
+    # Validation (and optional train) =>> pin a bounded window in RAM before shuffle.
+    # Uncached ``.shuffle`` on a repeating stream gradually leaks host memory; with
+    # float32 depth maps that growth hits Slurm cgroups within minutes.
+    #
+    # ``cache_offset`` skips ahead on the infinite repeated stream so periodic
+    # rebuilds (LiberoRLDSDataset cache refresh) materialize a *new* window of N
+    # frames instead of re-caching the same prefix every time.
+    if (not train) or cache_shuffle_buffer:
+        if cache_offset > 0:
+            dataset = dataset.skip(int(cache_offset))
         dataset = dataset.take(shuffle_buffer_size).cache()
 
     # Shuffle the Dataset

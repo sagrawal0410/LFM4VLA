@@ -12,7 +12,7 @@
     "fwd_loss_ratio": 0,
     "seed": 123,
     "batch_size": 16,
-    "num_workers": 2,
+    "num_workers": 0,
     "data_scale": 1,
     "optimizer": "adam",
     "learning_rate": 2e-05,
@@ -105,10 +105,11 @@
         "log_every_n_steps": 10,
         "max_epochs": 100,
         "check_val_every_n_epoch": 1,
-        "val_check_interval": 5000,
+        "val_check_interval": 1.0,
         "checkpoint_every_n_train_steps": 1000,
         "max_steps": 50000,
-        "accumulate_grad_batches": 4
+        "accumulate_grad_batches": 4,
+        "limit_val_batches": 0
     },
     "train_dataset": {
         "type": "LiberoRLDSDataset",
@@ -116,9 +117,10 @@
         "data_mix": "libero_10_no_noops",
         "image_size": 224,
         "image_aug": true,
-        "shuffle_buffer_size": 8192,
+        "shuffle_buffer_size": 2048,
         "train": true,
-        "load_depth": true
+        "load_depth": true,
+        "cache_refresh_every_n_steps": 1000
     },
     "val_dataset": {
         "type": "LiberoRLDSDataset",
@@ -126,7 +128,7 @@
         "data_mix": "libero_10_no_noops",
         "image_size": 224,
         "image_aug": false,
-        "shuffle_buffer_size": 4096,
+        "shuffle_buffer_size": 256,
         "train": false,
         "load_depth": true
     },

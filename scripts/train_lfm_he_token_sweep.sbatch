@@ -47,12 +47,6 @@ export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
-# Per-task MIOpen cache (avoids shared ~/.config/miopen SQLite corruption on arrays).
-_MIOPEN_BASE="${TMPDIR:-/tmp}/miopen_${USER}_${SLURM_JOB_ID:-$$}_${SLURM_ARRAY_TASK_ID:-0}"
-mkdir -p "$_MIOPEN_BASE"
-export MIOPEN_USER_DB_PATH="$_MIOPEN_BASE"
-export MIOPEN_CUSTOM_CACHE_DIR="$_MIOPEN_BASE"
-
 # Resolve (num_action_tokens, latent) from the SLURM array index, unless overridden.
 if [[ -z "${NUM_ACTION_TOKENS:-}" || -z "${LATENT:-}" ]]; then
   eval "$(python scripts/sweep_he_tokens.py --index "${SLURM_ARRAY_TASK_ID:?}")"

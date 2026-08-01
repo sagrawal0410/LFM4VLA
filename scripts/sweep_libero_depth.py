@@ -60,9 +60,13 @@ def write_configs(base_config: Path, out_dir: Path) -> None:
         cfg["output_root"] = "/home/teams/research/robotics/checkpoints"
         cfg["log_root"] = "/home/teams/research/robotics/logs"
         cfg["cache_root"] = "/home/teams/research/robotics/cache"
-        # Depth float32 maps make a 51k TF shuffle buffer OOM host RAM.
-        cfg["num_workers"] = min(int(cfg.get("num_workers", 2)), 2)
-        cfg.setdefault("train_dataset", {})["shuffle_buffer_size"] = 8192
+        # Depth: rotating cached shuffle windows (see LiberoRLDSDataset).
+        cfg["num_workers"] = 0
+        cfg.setdefault("train_dataset", {})
+        cfg["train_dataset"]["shuffle_buffer_size"] = 2048
+        cfg["train_dataset"]["cache_refresh_every_n_steps"] = 1000
+        cfg.setdefault("val_dataset", {})["shuffle_buffer_size"] = 256
+        cfg.setdefault("trainer", {})["limit_val_batches"] = 0
         cfg.setdefault("depth", {}).setdefault("qformer", {})
         cfg["depth"]["qformer"]["num_queries"] = nq
         cfg.setdefault("act_head", {})

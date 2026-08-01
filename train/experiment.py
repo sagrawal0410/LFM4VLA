@@ -112,10 +112,16 @@ def experiment(variant):
         trainer_module = BaseTrainer(variant)
 
     train_dataset = build_dataset(variant["train_dataset"], variant, trainer_module.model)
-    val_dataset = build_dataset(variant["val_dataset"], variant, trainer_module.model)
-
     train_loader = _build_loader(train_dataset, variant, train=True)
-    val_loader = _build_loader(val_dataset, variant, train=False)
+
+    # Skip building a second TF/RLDS pipeline when validation is disabled (depth
+    # runs set limit_val_batches=0 to avoid doubling host RAM).
+    limit_val = variant.get("trainer", {}).get("limit_val_batches", None)
+    if limit_val == 0 or limit_val == 0.0:
+        val_loader = None
+    else:
+        val_dataset = build_dataset(variant["val_dataset"], variant, trainer_module.model)
+        val_loader = _build_loader(val_dataset, variant, train=False)
 
     trainer_cfg = variant["trainer"]
     callbacks = [
@@ -124,7 +130,7 @@ def experiment(variant):
         *_build_model_checkpoints(ckpt_dir, trainer_cfg),
     ]
 
-    trainer = pl.Trainer(
+    trainer_kwargs = dict(
         accelerator=trainer_cfg.get("accelerator", "gpu"),
         devices=trainer_cfg.get("devices", "auto"),
         num_nodes=trainer_cfg.get("num_nodes", 1),
@@ -144,5 +150,8 @@ def experiment(variant):
         ),
         callbacks=callbacks,
     )
+    if "limit_val_batches" in trainer_cfg:
+        trainer_kwargs["limit_val_batches"] = trainer_cfg["limit_val_batches"]
+    trainer = pl.Trainer(**trainer_kwargs)
 
     trainer.fit(trainer_module, train_loader, val_loader, ckpt_path=variant.get("resume"))

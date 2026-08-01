@@ -50,6 +50,8 @@ def build_dataset(dataset_cfg: Dict[str, Any], variant: Dict[str, Any], policy_m
         # dataset block does not override load_depth explicitly.
         if "load_depth" not in cfg:
             cfg["load_depth"] = bool(variant.get("use_depth", False))
+        # Needed to convert cache_refresh_every_n_steps → samples between rebuilds.
+        cfg.setdefault("batch_size", int(variant.get("batch_size", 1)))
         return data.LiberoRLDSDataset(
             data_root_dir=data_root_dir,
             **common,
