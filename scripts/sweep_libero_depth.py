@@ -60,11 +60,11 @@ def write_configs(base_config: Path, out_dir: Path) -> None:
         cfg["output_root"] = "/home/teams/research/robotics/checkpoints"
         cfg["log_root"] = "/home/teams/research/robotics/logs"
         cfg["cache_root"] = "/home/teams/research/robotics/cache"
-        # Depth: rotating cached shuffle windows (see LiberoRLDSDataset).
+        # Depth: large rotating cached shuffle windows (see LiberoRLDSDataset).
         cfg["num_workers"] = 0
         cfg.setdefault("train_dataset", {})
-        cfg["train_dataset"]["shuffle_buffer_size"] = 2048
-        cfg["train_dataset"]["cache_refresh_every_n_steps"] = 1000
+        cfg["train_dataset"]["shuffle_buffer_size"] = 16384
+        cfg["train_dataset"]["cache_refresh_every_n_steps"] = 5000
         cfg.setdefault("val_dataset", {})["shuffle_buffer_size"] = 256
         cfg.setdefault("trainer", {})["limit_val_batches"] = 0
         cfg.setdefault("depth", {}).setdefault("qformer", {})

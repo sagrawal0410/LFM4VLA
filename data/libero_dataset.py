@@ -86,16 +86,15 @@ class LiberoRLDSDataset(IterableDataset):
         self._data_mix = data_mix
         self._image_aug = bool(image_aug)
         self._shuffle_buffer_size = int(shuffle_buffer_size)
-        if self.load_depth:
-            # Cap buffer: uncached TF shuffle leaks host RAM; cached windows must fit.
-            self._shuffle_buffer_size = min(
-                self._shuffle_buffer_size, 2048 if self.train else 256
-            )
+        if self.load_depth and not self.train:
+            # Val stays tiny; train cache size comes from config (tens of thousands OK).
+            self._shuffle_buffer_size = min(self._shuffle_buffer_size, 256)
 
         # Rotating cache: train on a pinned window for K optimizer steps, then
         # skip ahead and materialize a new window. Default-on for depth train.
+        # Set cache_refresh_every_n_steps=0 to pin one large window for the whole run.
         if cache_refresh_every_n_steps is None and self.load_depth and self.train:
-            cache_refresh_every_n_steps = 1000
+            cache_refresh_every_n_steps = 5000
         self.cache_refresh_every_n_steps = (
             int(cache_refresh_every_n_steps)
             if cache_refresh_every_n_steps is not None and int(cache_refresh_every_n_steps) > 0

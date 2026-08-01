@@ -117,10 +117,10 @@
         "data_mix": "libero_10_no_noops",
         "image_size": 224,
         "image_aug": true,
-        "shuffle_buffer_size": 2048,
+        "shuffle_buffer_size": 16384,
         "train": true,
         "load_depth": true,
-        "cache_refresh_every_n_steps": 1000
+        "cache_refresh_every_n_steps": 5000
     },
     "val_dataset": {
         "type": "LiberoRLDSDataset",

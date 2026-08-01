@@ -4,7 +4,8 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-gpu=12
-#SBATCH --mem=128G
+# Larger depth cache windows (N~16k float32 maps) need more host RAM headroom.
+#SBATCH --mem=256G
 #SBATCH --array=0-7
 #SBATCH --output=output_lfm4vla_libero_depth_swp_%A_%a.out
 #SBATCH --error=output_lfm4vla_libero_depth_swp_%A_%a.err
