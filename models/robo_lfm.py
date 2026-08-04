@@ -444,6 +444,18 @@ class RoboLFM25VL(RoboVLMBackbone):
                     insert_idx=multimodal_embeds.shape[1],
                     fill_zero=False,
                 )
+                # Depth tokens are appended at the end, so action indices are
+                # unchanged — pad the action mask with False for the new slots.
+                n_depth = depth_pred_tokens.shape[1]
+                action_token_mask = torch.cat(
+                    [
+                        action_token_mask,
+                        action_token_mask.new_zeros(
+                            action_token_mask.shape[0], n_depth, dtype=torch.bool
+                        ),
+                    ],
+                    dim=1,
+                )
 
         if history_type == "pre":
             multimodal_embeds = rearrange(multimodal_embeds, "(b l) n d -> b (l n) d", l=seq_len)
