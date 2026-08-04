@@ -85,6 +85,15 @@ class BaseTrainer(pl.LightningModule):
         if ckpt_path is None:
             return cls(configs)
 
+        # Eval / resume: build architecture from HF config+tokenizer only, then
+        # load finetuned weights from the Lightning ckpt. Avoids requiring the
+        # cluster base-VLM directory and downloading full pretrained weights.
+        if configs is not None:
+            from utils.vlm_paths import resolve_vlm_paths_in_configs
+
+            resolve_vlm_paths_in_configs(configs)
+            configs.setdefault("vlm", {})["_init_without_pretrained_weights"] = True
+
         model = cls(configs)
         checkpoint = torch.load(ckpt_path, map_location="cpu")
         state_dict = checkpoint.get("state_dict", checkpoint.get("model_state_dict", checkpoint))

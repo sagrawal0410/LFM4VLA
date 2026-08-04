@@ -73,9 +73,13 @@ class RoboVLMBackbone(nn.Module):
         self.model_name = configs["model"]
         from transformers import AutoConfig
 
+        from utils.vlm_paths import resolve_vlm_paths_in_configs
+
+        # Remap missing cluster absolute paths → HuggingFace ids (local eval).
+        resolve_vlm_paths_in_configs(self.configs)
         model_id = self.configs["vlm"].get("model_id", "LiquidAI/LFM2.5-VL-1.6B")
         self.model_config = AutoConfig.from_pretrained(model_id).to_dict()
-        
+
         self.train_setup_configs = train_setup_configs
         self.act_encoder_configs = act_encoder_configs  # None
         self.act_head_configs = act_head_configs

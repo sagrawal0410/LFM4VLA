@@ -95,9 +95,9 @@ Done. Next steps on the workstation:
      runs/logs/<date>/<exp>/<exp>-config.json
      runs/checkpoints/<date>/<exp>/last.ckpt
 
-2. You still need the LFM VLM weights the config points at (vlm.model_id /
-   tokenizer.pretrained_model_name_or_path). Either copy that local checkpoint dir over,
-   or edit the config to a HuggingFace id you can download.
+2. Base VLM path: if the saved config points at a missing cluster path, eval
+   auto-falls back to the HuggingFace id from model_url (e.g. LiquidAI/LFM2.5-VL-450M)
+   and loads architecture/tokenizer from the hub; finetuned weights come from the ckpt.
 
 3. You need the RLDS dataset_statistics*.json used at training for action denormalization.
    Copy the file from the cluster, e.g.:

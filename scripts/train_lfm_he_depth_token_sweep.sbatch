@@ -2,7 +2,7 @@
 #SBATCH --job-name=lfm4vla_he_depth_tok
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=1
+#SBATCH --gpus-per-node=16
 #SBATCH --cpus-per-gpu=12
 #SBATCH --array=0-34
 #SBATCH --output=output_lfm4vla_he_depth_tok_%A_%a.out
@@ -35,7 +35,7 @@ LFM4VLA_ROOT="${LFM4VLA_ROOT:-$HOME/LFM4VLA}"
 CONDA_ENV="${CONDA_ENV:-lfm4vla-he}"
 CONFIG="${CONFIG:-configs/lfm2.5-vl-450m-humanoid-everyday-depth.json}"
 DEPTH_NUM_QUERIES="${DEPTH_NUM_QUERIES:-32}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/home/teams/research/robotics/checkpoints}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/LFM4VLA/runs/checkpoints}"
 LOG_ROOT="${LOG_ROOT:-/home/teams/research/robotics/logs}"
 CACHE_ROOT="${CACHE_ROOT:-/home/teams/research/robotics/cache}"
 

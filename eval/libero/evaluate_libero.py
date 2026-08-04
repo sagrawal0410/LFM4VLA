@@ -376,6 +376,9 @@ def main():
     np.random.seed(args.seed)
 
     configs = load_config(args.config)
+    from utils.vlm_paths import resolve_vlm_paths_in_configs
+
+    resolve_vlm_paths_in_configs(configs)
     dataset_name = SUITE_TO_DATASET[args.task_suite]
     data_root_dir = args.data_root_dir or configs["train_dataset"]["data_root_dir"]
     action_stats = load_action_stats(data_root_dir, dataset_name)
