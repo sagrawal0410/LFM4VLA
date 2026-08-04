@@ -399,12 +399,16 @@ class RoboLFM25VL(RoboVLMBackbone):
             )
 
         action_token_mask = None
+        depth_pred_token_mask = None
         if action_space == "continuous":
             if mode not in ("train", "val"):
                 # Keep parameter dtype in sync with the backbone for inference.
-                if self.action_token.dtype != next(self.model.parameters()).dtype:
-                    self.action_token.data = self.action_token.data.to(
-                        dtype=next(self.model.parameters()).dtype
+                model_dtype = next(self.model.parameters()).dtype
+                if self.action_token.dtype != model_dtype:
+                    self.action_token.data = self.action_token.data.to(dtype=model_dtype)
+                if self.depth_pred_token is not None and self.depth_pred_token.dtype != model_dtype:
+                    self.depth_pred_token.data = self.depth_pred_token.data.to(
+                        dtype=model_dtype
                     )
             action_tokens = self._expand_action_tokens(multimodal_embeds.shape[0])
             (
@@ -421,6 +425,25 @@ class RoboLFM25VL(RoboVLMBackbone):
                 insert_idx=multimodal_embeds.shape[1],
                 fill_zero=self.act_head_configs.get("fill_zero", False),
             )
+            # Append learnable depth-prediction queries after action queries.
+            if self.predict_depth and self.depth_pred_token is not None:
+                depth_pred_tokens = self._expand_depth_pred_tokens(
+                    multimodal_embeds.shape[0]
+                )
+                (
+                    multimodal_embeds,
+                    multimodal_labels,
+                    multimodal_attention_mask,
+                    depth_pred_token_mask,
+                ) = self.merge_multi_modal_input(
+                    multimodal_embeds,
+                    depth_pred_tokens,
+                    multimodal_labels,
+                    multimodal_attention_mask,
+                    is_image=False,
+                    insert_idx=multimodal_embeds.shape[1],
+                    fill_zero=False,
+                )
 
         if history_type == "pre":
             multimodal_embeds = rearrange(multimodal_embeds, "(b l) n d -> b (l n) d", l=seq_len)
@@ -447,8 +470,13 @@ class RoboLFM25VL(RoboVLMBackbone):
         if history_type == "pre":
             output_hs = rearrange(output_hs, "b (l n) d -> (b l) n d", l=seq_len)
 
+        depth_hs = None
         if action_space == "continuous":
             action_hs = output_hs[action_token_mask].reshape(bs, seq_len, self.latent_num, -1)
+            if depth_pred_token_mask is not None:
+                depth_hs = output_hs[depth_pred_token_mask].reshape(
+                    bs, seq_len, self.depth_latent_num, -1
+                )
         elif action_space == "down_sample":
             token_src = self.act_head_configs.get("token_source", "all")
             if token_src != "all":
@@ -462,12 +490,33 @@ class RoboLFM25VL(RoboVLMBackbone):
             self._update_loss(loss, clip_loss, "clip")
 
         if mode not in ("train", "val") and self.act_head is not None:
-            action_hs = action_hs.to(dtype=next(self.act_head.parameters()).dtype)
+            head_dtype = next(self.act_head.parameters()).dtype
+            action_hs = action_hs.to(dtype=head_dtype)
+            if depth_hs is not None:
+                depth_hs = depth_hs.to(dtype=head_dtype)
+
+        head_kwargs = {}
+        if depth_hs is not None:
+            head_kwargs["depth_hs"] = depth_hs
+        # GT depth for aux loss (also used as conditioner input when use_depth=True).
+        if self.predict_depth and depth is not None:
+            head_kwargs["depth_gt"] = depth
+        elif self.predict_depth and mode in ("train", "val") and action_labels is not None:
+            raise ValueError(
+                "predict_depth=True requires GT depth in the batch. "
+                "Set train_dataset.load_depth=true and point data_root_dir at "
+                "modified_libero_rlds_depth."
+            )
 
         action_logits, action_loss = self.forward_action_head(
-            action_hs, action_labels, action_mask)
+            action_hs, action_labels, action_mask, **head_kwargs
+        )
 
         if mode in ("train", "val") and action_labels is not None:
+            if action_loss is not None and action_loss.get("loss_depth") is not None:
+                ratio = float(self.configs.get("depth_loss_ratio", 0.1))
+                action_loss = dict(action_loss)
+                action_loss["loss_depth"] = action_loss["loss_depth"] * ratio
             self._update_loss(loss, action_loss, "act")
             loss = self._format_loss(loss)
             return loss

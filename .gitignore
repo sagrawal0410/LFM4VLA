@@ -44,3 +44,7 @@ dataset_statistics_*.json
 
 # HuggingFace / torch caches (local only)
 .cache/
+
+# Vendored Unitree / Menagerie MuJoCo assets (fetched by scripts/fetch_unitree_g1_mujoco.sh)
+third_party/
+eval/humanoid/assets/robot/

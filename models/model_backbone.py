@@ -66,6 +66,8 @@ class RoboVLMBackbone(nn.Module):
         self.use_state = use_state  #False
         self.use_depth = use_depth or bool((configs or {}).get("use_depth", False))
         self.depth_configs = depth_configs if depth_configs is not None else (configs or {}).get("depth")
+        # Aux depth *prediction* (output head) — distinct from use_depth conditioning.
+        self.predict_depth = bool((configs or {}).get("predict_depth", False))
         self.fwd_pred_next_n = fwd_pred_next_n  #10
 
         self.kwargs = kwargs
@@ -117,6 +119,25 @@ class RoboVLMBackbone(nn.Module):
             self.latent_num = int(self.act_head_configs.get("latent", 1)) if self.act_head_configs else 1
             self.action_token = nn.Parameter(torch.zeros(self.hidden_size))
         self.action_token.requires_grad_(True)
+
+        # Learnable depth-prediction queries (parallel to action_token). Used by
+        # HierarchicalFCDecoder; not the CNN/QFormer depth conditioner.
+        self.depth_pred_token = None
+        self.depth_latent_num = 0
+        if self.predict_depth:
+            if self.act_head_configs is None:
+                raise ValueError("predict_depth=True requires an act_head config.")
+            head_type = self.act_head_configs.get("type", "")
+            if head_type != "HierarchicalFCDecoder":
+                raise ValueError(
+                    "predict_depth=True requires act_head.type='HierarchicalFCDecoder', "
+                    f"got {head_type!r}"
+                )
+            self.depth_latent_num = int(self.act_head_configs.get("depth_latent", 1))
+            if self.depth_latent_num < 1:
+                raise ValueError(f"depth_latent must be >= 1, got {self.depth_latent_num}")
+            self.depth_pred_token = nn.Parameter(torch.zeros(self.hidden_size))
+            self.depth_pred_token.requires_grad_(True)
 
         if self.fwd_head_configs is not None:
             self.image_latent_num = self.fwd_head_configs.get("image_latent_num", 8)
@@ -321,6 +342,14 @@ class RoboVLMBackbone(nn.Module):
         # Legacy: single [D] Parameter repeated ``latent_num`` times.
         return repeat(self.action_token, "d -> b n d", b=batch_size, n=self.latent_num)
 
+    def _expand_depth_pred_tokens(self, batch_size: int) -> torch.Tensor:
+        """Expand the learned depth-prediction query (mirrors legacy action tokens)."""
+        if self.depth_pred_token is None:
+            raise RuntimeError("depth_pred_token is not initialized (predict_depth=False).")
+        return repeat(
+            self.depth_pred_token, "d -> b n d", b=batch_size, n=self.depth_latent_num
+        )
+
     def _resolve_action_head_cls(self, head_type: str):
         import models.base_policy as base_policy
 
@@ -362,6 +391,24 @@ class RoboVLMBackbone(nn.Module):
                 # Legacy LIBERO/CALVIN: head ``latent`` stays the config value.
                 self.latent_num = int(self.act_head_configs.get("latent", 1))
             head_type = _kwargs.pop("type")
+            # HierarchicalFCDecoder reads depth_latent / depth_map_size from kwargs.
+            if head_type == "HierarchicalFCDecoder":
+                if not self.predict_depth:
+                    raise ValueError(
+                        "act_head.type='HierarchicalFCDecoder' requires predict_depth=true"
+                    )
+                if uses_he_action_layout(self.act_head_configs):
+                    raise ValueError(
+                        "HierarchicalFCDecoder does not support HE num_action_tokens layout; "
+                        "use act_head.latent / depth_latent instead."
+                    )
+                _kwargs.setdefault(
+                    "depth_latent", int(self.act_head_configs.get("depth_latent", 1))
+                )
+                _kwargs.setdefault(
+                    "depth_map_size", int(self.act_head_configs.get("depth_map_size", 56))
+                )
+                self.depth_latent_num = int(_kwargs["depth_latent"])
             _cls = self._resolve_action_head_cls(head_type)
             action_head = _cls(**_kwargs)
 
@@ -468,13 +515,29 @@ class RoboVLMBackbone(nn.Module):
         **kwargs,
     ):
         # action_tokens = get_target_modal_tokens(output_hs, self._action_mask(output_hs))
-        action = self.act_head(action_tokens, actions=action_labels, action_masks=action_mask, **kwargs)
+        head_out = self.act_head(
+            action_tokens, actions=action_labels, action_masks=action_mask, **kwargs
+        )
+
+        depth_pred = None
+        if isinstance(head_out, dict):
+            action = (head_out["actions"], head_out["gripper"])
+            depth_pred = head_out.get("depth")
+        else:
+            action = head_out
 
         action_loss = None
         if action_labels is not None:
             action, action_labels, action_mask = self.act_head.get_labels(
-                action, action_labels, action_mask, tok_seq=action_tokens, **kwargs)
-            action_loss = self.act_head.loss(action, action_labels, action_mask)
+                action, action_labels, action_mask, tok_seq=action_tokens, **kwargs
+            )
+            loss_kwargs = {}
+            if depth_pred is not None:
+                loss_kwargs["depth_pred"] = depth_pred
+                loss_kwargs["depth_gt"] = kwargs.get("depth_gt")
+            action_loss = self.act_head.loss(
+                action, action_labels, action_mask, **loss_kwargs
+            )
 
         return action, action_loss
 

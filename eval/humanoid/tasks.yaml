@@ -1,0 +1,295 @@
+# Humanoid Everyday MuJoCo proxy tasks.
+# suite: in  = skill keywords covered by HE finetune (pick/place, push/pull, stack/align, pour)
+# suite: ood = outside those skills
+
+tasks:
+  # ---- In-suite (8) ----
+  - name: pick_place_cube
+    suite: in
+    instruction: "Pick up the red cube and place it in the bin."
+    max_steps: 400
+    success_type: object_in_bin
+    success_params: {object: cube, thresh: 0.12}
+    objects:
+      cube:
+        geom: box
+        size: [0.03, 0.03, 0.03]
+        pos: [0.45, 0.12, 0.82]
+        rgba: [0.85, 0.15, 0.15, 1]
+        mass: 0.08
+
+  - name: pick_place_can
+    suite: in
+    instruction: "Pick up the can and place it in the bin."
+    max_steps: 400
+    success_type: object_in_bin
+    success_params: {object: can, thresh: 0.12}
+    objects:
+      can:
+        geom: cylinder
+        size: [0.03, 0.055]
+        pos: [0.48, 0.1, 0.86]
+        rgba: [0.2, 0.55, 0.85, 1]
+        mass: 0.12
+
+  - name: push_box
+    suite: in
+    instruction: "Push the box to the green target zone."
+    max_steps: 400
+    success_type: object_near_target
+    success_params:
+      object: box
+      target_pos: [0.55, -0.2, 0.82]
+      thresh: 0.1
+    objects:
+      box:
+        geom: box
+        size: [0.05, 0.05, 0.05]
+        pos: [0.45, 0.18, 0.83]
+        rgba: [0.7, 0.5, 0.2, 1]
+        mass: 0.2
+
+  - name: pull_drawer
+    suite: in
+    instruction: "Pull the drawer open by its handle."
+    max_steps: 350
+    success_type: joint_threshold
+    success_params: {joint: drawer_slide, min: 0.12}
+    objects:
+      drawer:
+        geom: box
+        size: [0.12, 0.1, 0.04]
+        pos: [0.5, 0.05, 0.82]
+        rgba: [0.45, 0.3, 0.2, 1]
+        mass: 0.3
+        slide:
+          axis: [1, 0, 0]
+          range: [0, 0.25]
+          pos: [0.12, 0, 0]
+          size: [0.02, 0.04, 0.015]
+
+  - name: stack_two_cubes
+    suite: in
+    instruction: "Stack the red cube on top of the blue cube."
+    max_steps: 450
+    success_type: stack
+    success_params: {top: red_cube, base: blue_cube, xy_thresh: 0.05, z_min: 0.04}
+    objects:
+      blue_cube:
+        geom: box
+        size: [0.03, 0.03, 0.03]
+        pos: [0.48, 0.0, 0.82]
+        rgba: [0.15, 0.3, 0.85, 1]
+        mass: 0.08
+      red_cube:
+        geom: box
+        size: [0.03, 0.03, 0.03]
+        pos: [0.45, 0.12, 0.82]
+        rgba: [0.85, 0.15, 0.15, 1]
+        mass: 0.08
+
+  - name: align_blocks
+    suite: in
+    instruction: "Align the two blocks along the same line on the table."
+    max_steps: 400
+    success_type: align_xy
+    success_params: {a: block_a, b: block_b, axis: y, thresh: 0.04}
+    objects:
+      block_a:
+        geom: box
+        size: [0.04, 0.025, 0.025]
+        pos: [0.45, 0.12, 0.81]
+        rgba: [0.9, 0.7, 0.1, 1]
+        mass: 0.07
+      block_b:
+        geom: box
+        size: [0.04, 0.025, 0.025]
+        pos: [0.5, -0.1, 0.81]
+        rgba: [0.1, 0.7, 0.4, 1]
+        mass: 0.07
+
+  - name: pour_cup
+    suite: in
+    instruction: "Pour from the cup into the bowl."
+    max_steps: 400
+    success_type: tilt_angle
+    success_params: {object: cup, upright_max: 0.45}
+    objects:
+      bowl:
+        geom: cylinder
+        size: [0.06, 0.025]
+        pos: [0.5, -0.12, 0.8]
+        rgba: [0.85, 0.85, 0.85, 1]
+        mass: 0.15
+      cup:
+        geom: cylinder
+        size: [0.03, 0.05]
+        pos: [0.45, 0.1, 0.85]
+        rgba: [0.7, 0.2, 0.2, 1]
+        mass: 0.1
+
+  - name: pour_bottle
+    suite: in
+    instruction: "Tilt the bottle to pour into the bowl."
+    max_steps: 400
+    success_type: tilt_angle
+    success_params: {object: bottle, upright_max: 0.4}
+    objects:
+      bowl:
+        geom: cylinder
+        size: [0.06, 0.025]
+        pos: [0.5, -0.12, 0.8]
+        rgba: [0.85, 0.85, 0.85, 1]
+        mass: 0.15
+      bottle:
+        geom: cylinder
+        size: [0.025, 0.08]
+        pos: [0.46, 0.1, 0.88]
+        rgba: [0.2, 0.5, 0.3, 1]
+        mass: 0.15
+
+  # ---- OOD (8) ----
+  - name: open_laptop
+    suite: ood
+    instruction: "Open the laptop lid."
+    max_steps: 350
+    success_type: joint_threshold
+    success_params: {joint: laptop_hinge, min: 0.6}
+    objects:
+      laptop:
+        geom: box
+        size: [0.12, 0.08, 0.01]
+        pos: [0.48, 0.0, 0.8]
+        rgba: [0.15, 0.15, 0.18, 1]
+        mass: 0.4
+        hinge:
+          axis: [0, 1, 0]
+          range: [0, 1.4]
+          pos: [0, 0, 0.02]
+          size: [0.12, 0.08, 0.008]
+
+  - name: press_button
+    suite: ood
+    instruction: "Press the red button down."
+    max_steps: 300
+    success_type: joint_threshold
+    success_params: {joint: button_slide, min: 0.015}
+    objects:
+      button:
+        geom: cylinder
+        size: [0.03, 0.02]
+        pos: [0.48, 0.05, 0.8]
+        rgba: [0.9, 0.1, 0.1, 1]
+        mass: 0.05
+        slide:
+          axis: [0, 0, -1]
+          range: [0, 0.03]
+          pos: [0, 0, 0.03]
+          size: [0.025, 0.025, 0.015]
+
+  - name: wipe_table
+    suite: ood
+    instruction: "Wipe the table with the cloth toward the far side."
+    max_steps: 400
+    success_type: contact_path
+    success_params:
+      object: cloth
+      waypoint: [0.55, -0.15, 0.8]
+      thresh: 0.1
+    objects:
+      cloth:
+        geom: box
+        size: [0.06, 0.04, 0.01]
+        pos: [0.42, 0.15, 0.8]
+        rgba: [0.9, 0.9, 0.95, 1]
+        mass: 0.05
+
+  - name: insert_peg
+    suite: ood
+    instruction: "Insert the peg into the hole."
+    max_steps: 450
+    success_type: peg_in_hole
+    success_params: {peg: peg, hole: hole, thresh: 0.045}
+    objects:
+      hole:
+        geom: box
+        size: [0.06, 0.06, 0.03]
+        pos: [0.52, -0.05, 0.81]
+        rgba: [0.3, 0.3, 0.35, 1]
+        mass: 0.5
+      peg:
+        geom: cylinder
+        size: [0.015, 0.05]
+        pos: [0.42, 0.12, 0.86]
+        rgba: [0.85, 0.65, 0.15, 1]
+        mass: 0.08
+
+  - name: hang_mug
+    suite: ood
+    instruction: "Hang the mug on the hook."
+    max_steps: 400
+    success_type: object_near_target
+    success_params:
+      object: mug
+      target_pos: [0.5, -0.15, 0.95]
+      thresh: 0.08
+    objects:
+      hook:
+        geom: capsule
+        size: [0.01, 0.04]
+        pos: [0.5, -0.15, 0.95]
+        rgba: [0.4, 0.4, 0.45, 1]
+        mass: 0.2
+      mug:
+        geom: cylinder
+        size: [0.035, 0.04]
+        pos: [0.45, 0.12, 0.84]
+        rgba: [0.7, 0.25, 0.2, 1]
+        mass: 0.12
+
+  - name: flip_book
+    suite: ood
+    instruction: "Flip the book over on the table."
+    max_steps: 350
+    success_type: tilt_angle
+    success_params: {object: book, upright_max: 0.35}
+    objects:
+      book:
+        geom: box
+        size: [0.08, 0.06, 0.015]
+        pos: [0.48, 0.05, 0.8]
+        rgba: [0.2, 0.35, 0.6, 1]
+        mass: 0.2
+
+  - name: twist_cap
+    suite: ood
+    instruction: "Twist the bottle cap."
+    max_steps: 350
+    success_type: joint_threshold
+    success_params: {joint: bottle_base_hinge, min: 0.8}
+    objects:
+      bottle_base:
+        geom: cylinder
+        size: [0.03, 0.07]
+        pos: [0.48, 0.05, 0.87]
+        rgba: [0.2, 0.45, 0.35, 1]
+        mass: 0.2
+        hinge:
+          axis: [0, 0, 1]
+          range: [0, 3.14]
+          pos: [0, 0, 0.08]
+          size: [0.025, 0.02, 0.015]
+
+  - name: handover_to_bin
+    suite: ood
+    instruction: "Use both hands to transfer the block into the bin."
+    max_steps: 450
+    success_type: object_in_bin
+    success_params: {object: block, thresh: 0.12}
+    objects:
+      block:
+        geom: box
+        size: [0.035, 0.035, 0.035]
+        pos: [0.45, 0.15, 0.82]
+        rgba: [0.6, 0.2, 0.7, 1]
+        mass: 0.1

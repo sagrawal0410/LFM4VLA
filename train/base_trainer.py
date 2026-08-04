@@ -152,6 +152,7 @@ class BaseTrainer(pl.LightningModule):
     def _get_loss(self, prediction):
         loss_arm_act = prediction.get("loss_arm_act")
         loss_gripper_act = prediction.get("loss_gripper_act")
+        loss_depth_act = prediction.get("loss_depth_act")
         loss_obs = prediction.get("loss_obs_fwd")
         loss_hand_obs = prediction.get("loss_hand_obs_fwd")
         acc_gripper_act = prediction.get("acc_gripper_act")
@@ -195,6 +196,7 @@ class BaseTrainer(pl.LightningModule):
             "loss_act": loss_act,
             "loss_arm_act": loss_arm_act,
             "loss_gripper_act": loss_gripper_act,
+            "loss_depth_act": loss_depth_act,
             "acc_gripper_act": acc_gripper_act,
             "loss_obs": loss_obs,
             "loss_hand_obs": loss_hand_obs,
@@ -303,7 +305,11 @@ class BaseTrainer(pl.LightningModule):
             hand_rgb = None
 
         depth = batch.get("depth")
-        if self.configs.get("use_depth", False) and depth is not None:
+        # use_depth: input conditioning; predict_depth: aux depth-map head (needs GT too).
+        need_depth = bool(
+            self.configs.get("use_depth", False) or self.configs.get("predict_depth", False)
+        )
+        if need_depth and depth is not None:
             depth = depth.to(self.device)
         else:
             depth = None

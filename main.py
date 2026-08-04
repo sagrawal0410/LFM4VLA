@@ -14,6 +14,12 @@ def parse_args():
                         help="Override act_head.latent (per-token repeat factor)")
     parser.add_argument("--depth_num_queries", type=int, default=None,
                         help="Override depth.qformer.num_queries (fused tokens into LLM)")
+    parser.add_argument("--depth_latent", type=int, default=None,
+                        help="Override act_head.depth_latent (depth-pred query repeats)")
+    parser.add_argument("--depth_loss_ratio", type=float, default=None,
+                        help="Override top-level depth_loss_ratio for aux depth prediction")
+    parser.add_argument("--predict_depth", action="store_true",
+                        help="Enable auxiliary depth-map prediction (HierarchicalFCDecoder)")
     parser.add_argument("--task_name", type=str, default=None,
                         help="Override top-level task_name (used in run dirs / wandb)")
     parser.add_argument("--output_root", type=str, default=None,
@@ -37,6 +43,12 @@ def update_configs(configs, args):
             args["depth_num_queries"]
         )
         configs["use_depth"] = True
+    if args.get("predict_depth"):
+        configs["predict_depth"] = True
+    if args.get("depth_latent") is not None:
+        configs.setdefault("act_head", {})["depth_latent"] = args["depth_latent"]
+    if args.get("depth_loss_ratio") is not None:
+        configs["depth_loss_ratio"] = args["depth_loss_ratio"]
     if args.get("task_name"):
         configs["task_name"] = args["task_name"]
     if args.get("output_root"):

@@ -3,6 +3,7 @@ import sys
 from models.model_backbone import RoboVLMBackbone, deep_update, load_config
 from models.robo_lfm import RoboLFM25VL
 from models.depth_conditioning import DepthConditioner, DepthPatchEncoder, MultimodalQFormer
+from models.base_policy import HierarchicalFCDecoder
 
 # Config uses robovlm_name "RoboLFM2.5" (not a valid Python identifier for direct import).
 setattr(sys.modules[__name__], "RoboLFM2.5", RoboLFM25VL)
@@ -13,6 +14,7 @@ __all__ = [
     "DepthConditioner",
     "DepthPatchEncoder",
     "MultimodalQFormer",
+    "HierarchicalFCDecoder",
     "load_config",
     "deep_update",
 ]
