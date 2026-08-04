@@ -338,6 +338,10 @@ def main():
     ap.add_argument("--data_root_dir", default=None,
                     help="RLDS dir with dataset_statistics*.json (for action denorm). "
                          "Defaults to the train_dataset.data_root_dir in the config.")
+    ap.add_argument("--stats_dataset", default=None,
+                    help="RLDS dataset name for action q01/q99 (default: train "
+                         "data_mix, e.g. libero_10_no_noops). Keep training stats "
+                         "even when --task_suite is OOD.")
     ap.add_argument("--num_trials_per_task", type=int, default=10,
                     help="Init-state episodes per task (LIBERO ships 50).")
     ap.add_argument("--execute_step", type=int, default=1,
@@ -379,10 +383,17 @@ def main():
     from utils.vlm_paths import resolve_vlm_paths_in_configs
 
     resolve_vlm_paths_in_configs(configs)
-    dataset_name = SUITE_TO_DATASET[args.task_suite]
+    # Always denorm with the training distribution's action bounds. Suite-specific
+    # stats would mis-scale OOD eval (e.g. libero_spatial after libero_10 training).
+    dataset_name = (
+        args.stats_dataset
+        or configs.get("train_dataset", {}).get("data_mix")
+        or SUITE_TO_DATASET.get(args.task_suite)
+        or "libero_10_no_noops"
+    )
     data_root_dir = args.data_root_dir or configs["train_dataset"]["data_root_dir"]
     action_stats = load_action_stats(data_root_dir, dataset_name)
-    print(f"Loaded action stats from {action_stats['path']}")
+    print(f"Loaded action stats ({dataset_name}) from {action_stats['path']}")
 
     image_size = int(configs.get("train_dataset", {}).get("image_size", 224))
     max_steps = args.max_steps or SUITE_MAX_STEPS.get(args.task_suite, 520)
