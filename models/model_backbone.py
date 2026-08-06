@@ -539,7 +539,7 @@ class RoboVLMBackbone(nn.Module):
                 action, action_labels, action_mask, **loss_kwargs
             )
 
-        return action, action_loss
+        return action, action_loss, depth_pred
 
     @staticmethod
     def _format_loss(loss):
@@ -687,13 +687,17 @@ class RoboVLMBackbone(nn.Module):
             clip_loss = self.clip_norm_head(action_hs, raw_text)
             self._update_loss(loss, clip_loss, "clip")
 
-        action_logits, action_loss = self.forward_action_head(action_hs, action_labels, action_mask)
+        action_logits, action_loss, depth_pred = self.forward_action_head(
+            action_hs, action_labels, action_mask
+        )
 
         if mode == "train":
             self._update_loss(loss, action_loss, "act")
             loss = self._format_loss(loss)
             return loss
 
+        if depth_pred is not None:
+            return {"action": action_logits, "depth": depth_pred}
         return action_logits
 
     def forward(
@@ -766,10 +770,8 @@ class RoboVLMBackbone(nn.Module):
         vision_gripper=None,
         **kwargs,
     ):
-        prediction = {}
-
         assert vision_x is not None
-        prediction["action"] = self.forward_continuous(
+        out = self.forward_continuous(
             vision_x,
             lang_x,
             attention_mask,
@@ -777,8 +779,10 @@ class RoboVLMBackbone(nn.Module):
             mode="inference",
             **kwargs,
         )
-
-        return prediction
+        # HierarchicalFCDecoder / predict_depth may return {"action", "depth"}.
+        if isinstance(out, dict):
+            return out
+        return {"action": out}
 
 
 def deep_update(d1, d2):

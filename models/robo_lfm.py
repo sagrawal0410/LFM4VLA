@@ -520,7 +520,7 @@ class RoboLFM25VL(RoboVLMBackbone):
                 "modified_libero_rlds_depth."
             )
 
-        action_logits, action_loss = self.forward_action_head(
+        action_logits, action_loss, depth_pred = self.forward_action_head(
             action_hs, action_labels, action_mask, **head_kwargs
         )
 
@@ -533,4 +533,6 @@ class RoboLFM25VL(RoboVLMBackbone):
             loss = self._format_loss(loss)
             return loss
 
+        if depth_pred is not None:
+            return {"action": action_logits, "depth": depth_pred}
         return action_logits

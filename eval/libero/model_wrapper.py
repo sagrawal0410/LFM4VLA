@@ -96,6 +96,9 @@ class LFMLiberoModel:
         self.image_transform = image_transform
         self.gripper_open_is_negative = gripper_open_is_negative
         self.use_depth = bool(configs.get("use_depth", False))
+        # Aux depth-map head (HierarchicalFCDecoder). No GT depth needed at eval.
+        self.predict_depth = bool(configs.get("predict_depth", False))
+        self.log_depth_pred = bool(configs.get("log_depth_pred", True)) and self.predict_depth
 
         self.q01 = action_stats["q01"]
         self.q99 = action_stats["q99"]
@@ -107,11 +110,13 @@ class LFMLiberoModel:
         self._steps_since_replan = 0
         self.emitted_actions: list[np.ndarray] = []
         self._inference_calls = 0
+        self._last_depth_pred: np.ndarray | None = None
 
     def reset(self):
         self._chunk_buffer = []
         self._steps_since_replan = 0
         self.emitted_actions = []
+        self._last_depth_pred = None
 
     # ------------------------------------------------------------------
     # Control interface
@@ -192,6 +197,7 @@ class LFMLiberoModel:
         rgb = rgb.unsqueeze(0).unsqueeze(0)  # [B=1, T=1, C, H, W]
 
         batch = {"rgb": rgb, "text": [instruction]}
+        # Input-side depth conditioning only (use_depth). predict_depth does not need GT.
         if self.use_depth:
             if depth is None:
                 raise ValueError("use_depth=True but no LIBERO agentview depth was passed.")
@@ -206,9 +212,25 @@ class LFMLiberoModel:
             # [B=1, T=1, 1, H, W]
             batch["depth"] = depth_t
         with torch.no_grad():
-            pred = self.trainer.inference_step(batch)["action"]
+            out = self.trainer.inference_step(batch)
+            pred = out["action"]
+            depth_pred = out.get("depth")
 
         self._inference_calls += 1
+        if depth_pred is not None:
+            # [B, T, 1, H, W] → [H, W]
+            d = depth_pred.detach().float().cpu().numpy()
+            while d.ndim > 2:
+                d = d[0]
+            self._last_depth_pred = d
+            if self.log_depth_pred:
+                print(
+                    f"[depth_pred] call={self._inference_calls} "
+                    f"shape={tuple(d.shape)} "
+                    f"min={d.min():.4f} max={d.max():.4f} "
+                    f"mean={d.mean():.4f} std={d.std():.4f}",
+                    flush=True,
+                )
         if self.device.type == "cuda" and self._inference_calls % 100 == 0:
             import gc
 

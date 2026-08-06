@@ -358,6 +358,8 @@ def main():
     ap.add_argument("--save_video", action="store_true", help="Write an MP4 per episode")
     ap.add_argument("--live_render", action="store_true",
                     help="Open an on-screen MuJoCo window (use MUJOCO_GL=glfw).")
+    ap.add_argument("--no_log_depth_pred", action="store_true",
+                    help="Silence per-query predicted-depth stats (predict_depth models).")
     ap.add_argument("--video_fps", type=int, default=20)
     ap.add_argument("--output_dir", default="runs/libero_eval")
     ap.add_argument("--mujoco_gl", default=os.environ.get("MUJOCO_GL", "auto"),
@@ -401,7 +403,16 @@ def main():
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.no_log_depth_pred:
+        configs["log_depth_pred"] = False
     print(f"Loading LFM policy from {args.ckpt}")
+    if configs.get("predict_depth"):
+        print(
+            "[eval] predict_depth=True — hierarchical depth head runs at each policy "
+            "query; predicted depth stats print to the terminal (disable with "
+            "--no_log_depth_pred). GT depth is not required.",
+            flush=True,
+        )
     model = LFMLiberoModel(
         args.ckpt,
         configs,
