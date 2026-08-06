@@ -12,7 +12,8 @@ set -euo pipefail
 
 # Auxiliary depth prediction on LIBERO-10 (third alternate):
 #   RGB → LLM + learned action/depth query tokens → HierarchicalFCDecoder
-#   (shared trunk → action arm/gripper + depth map) with aux L1 depth loss.
+#   (separate action trunk → arm/gripper; separate depth trunk → depth map)
+#   with aux L1 depth loss.
 # No input-side depth conditioning (use_depth=false); GT depth is supervision only.
 #
 # Example:

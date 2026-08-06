@@ -298,14 +298,14 @@ class DepthMapHead(torch.nn.Module):
 
 
 class HierarchicalFCDecoder(BasePolicyHead):
-    """Shared trunk over action+depth query HS, then action (arm/gripper) + depth map.
+    """Separate action and depth heads; action then splits into arm + gripper.
 
     Hierarchy
     ---------
-    1. Concatenate action tokens and depth-pred tokens → shared MLP trunk
-    2. Split into action branch / depth branch
-    3. Action branch → arm (tanh) + gripper (logits), same as ``FCDecoder``
-    4. Depth branch → ``DepthMapHead`` predicting a GT depth map (aux loss)
+    1. Action-query HS → action trunk MLP (independent of depth)
+    2. Depth-query HS → depth trunk MLP (independent of action)
+    3. Action trunk → arm (tanh) + gripper / end-effector (logits), same as ``FCDecoder``
+    4. Depth trunk → ``DepthMapHead`` predicting a GT depth map (aux loss)
     """
 
     def __init__(
@@ -327,29 +327,28 @@ class HierarchicalFCDecoder(BasePolicyHead):
         self.action_latent = int(latent)
         self.depth_latent = int(depth_latent)
         self.latent = self.action_latent  # BasePolicyHead / callers use this for action slots
-        self.total_latent = self.action_latent + self.depth_latent
         self.depth_map_size = int(depth_map_size)
         self.action_dim = action_dim
 
-        shared_out = hidden_size * self.total_latent
-        self.shared = torch.nn.Sequential(
-            torch.nn.Linear(in_features * self.total_latent, 1024),
+        action_in = in_features * self.action_latent
+        action_hid = hidden_size * self.action_latent
+        depth_in = in_features * self.depth_latent
+        depth_hid = hidden_size * self.depth_latent
+
+        # Independent trunks — no shared parameters between action and depth.
+        self.action_trunk = torch.nn.Sequential(
+            torch.nn.Linear(action_in, 1024),
             torch.nn.ReLU(),
-            torch.nn.Linear(1024, shared_out),
+            torch.nn.Linear(1024, action_hid),
         )
-        self.action_proj = torch.nn.Sequential(
-            torch.nn.Linear(shared_out, hidden_size * self.action_latent),
+        self.depth_trunk = torch.nn.Sequential(
+            torch.nn.Linear(depth_in, 1024),
             torch.nn.ReLU(),
+            torch.nn.Linear(1024, depth_hid),
         )
-        self.depth_proj = torch.nn.Sequential(
-            torch.nn.Linear(shared_out, hidden_size * self.depth_latent),
-            torch.nn.ReLU(),
-        )
-        self.actions = MLPTanhHead(
-            hidden_size * self.action_latent, fwd_pred_next_n * (action_dim - 1)
-        )
-        self.gripper = MLPSigmoidHead(hidden_size * self.action_latent, fwd_pred_next_n)
-        self.depth_head = DepthMapHead(hidden_size * self.depth_latent, self.depth_map_size)
+        self.actions = MLPTanhHead(action_hid, fwd_pred_next_n * (action_dim - 1))
+        self.gripper = MLPSigmoidHead(action_hid, fwd_pred_next_n)
+        self.depth_head = DepthMapHead(depth_hid, self.depth_map_size)
 
         if self.down_sample == "pooling":
             self.pooling = torch.nn.AdaptiveAvgPool1d(1)
@@ -370,7 +369,7 @@ class HierarchicalFCDecoder(BasePolicyHead):
     def forward(self, tok_seq, depth_hs=None, **kwargs):
         """
         Args:
-            tok_seq: action query HS ``[B, T, Na, D]`` (or flattened variants like FCDecoder)
+            tok_seq: action query HS ``[B, T, Na, D]``
             depth_hs: depth-pred query HS ``[B, T, Nd, D]`` (required)
         Returns:
             dict with ``actions``, ``gripper``, and ``depth`` (``[B, T, 1, H, W]``).
@@ -390,12 +389,11 @@ class HierarchicalFCDecoder(BasePolicyHead):
             )
 
         bs, seq_len = tok_seq.shape[:2]
-        # [B, T, Na+Nd, D] → [(B*T), Na+Nd, D]
-        combined = torch.cat([tok_seq, depth_hs], dim=2)
-        combined = rearrange(combined, "b l n d -> (b l) n d")
-        shared_feat = self.shared(self._flatten_tokens(combined))
-        action_feat = self.action_proj(shared_feat)
-        depth_feat = self.depth_proj(shared_feat)
+        action_flat = self._flatten_tokens(rearrange(tok_seq, "b l n d -> (b l) n d"))
+        depth_flat = self._flatten_tokens(rearrange(depth_hs, "b l n d -> (b l) n d"))
+
+        action_feat = self.action_trunk(action_flat)
+        depth_feat = self.depth_trunk(depth_flat)
 
         actions = self.actions(action_feat)
         gripper = self.gripper(action_feat)
