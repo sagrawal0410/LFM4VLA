@@ -116,15 +116,20 @@ class RoboLFM25VL(RoboVLMBackbone):
         return pil_images
 
     @staticmethod
-    def build_conversation(image: Image.Image, instruction: str) -> List[Dict[str, Any]]:
-        """Single user turn with one image + instruction (LFM chat format)."""
-        return [{
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": instruction},
-            ],
-        }]
+    def build_conversation(
+        images: Union[Image.Image, Sequence[Image.Image]],
+        instruction: str,
+    ) -> List[Dict[str, Any]]:
+        """User turn with one or more images + instruction (LFM chat format)."""
+        if isinstance(images, Image.Image):
+            image_list: List[Image.Image] = [images]
+        else:
+            image_list = list(images)
+        content: List[Dict[str, Any]] = [
+            {"type": "image", "image": img} for img in image_list
+        ]
+        content.append({"type": "text", "text": instruction})
+        return [{"role": "user", "content": content}]
 
     def build_processor_inputs(
         self,
@@ -133,21 +138,30 @@ class RoboLFM25VL(RoboVLMBackbone):
         *,
         padding: bool = True,
         add_generation_prompt: bool = True,
+        images_per_sample: int = 1,
     ) -> Dict[str, torch.Tensor]:
         """Build the processor batch dict passed to ``forward_continuous`` as ``lang_x``.
 
         Prefer this over calling ``self.processor(...)`` directly so LFM chat-template
         and vision token constraints stay centralized here.
+
+        When ``images_per_sample > 1``, ``images`` is a flat list grouped as
+        ``[img0_cam0, img0_cam1, ..., img1_cam0, ...]``.
         """
         pil_images = self.process_vision_info(images)
-        if len(texts) != len(pil_images):
+        n_img = images_per_sample
+        if n_img < 1:
+            raise ValueError(f"images_per_sample must be >= 1, got {n_img}")
+        if len(pil_images) != len(texts) * n_img:
             raise ValueError(
-                f"text/image count mismatch: {len(texts)} instructions vs {len(pil_images)} images")
+                f"text/image count mismatch: {len(texts)} instructions × {n_img} cams "
+                f"vs {len(pil_images)} images"
+            )
 
-        conversations = [
-            self.build_conversation(img, text)
-            for img, text in zip(pil_images, texts)
-        ]
+        conversations = []
+        for i, text in enumerate(texts):
+            sample_images = pil_images[i * n_img : (i + 1) * n_img]
+            conversations.append(self.build_conversation(sample_images, text))
 
         # apply_chat_template is the canonical LFM2.5-VL preprocessing path.
         inputs = self.processor.apply_chat_template(
@@ -159,6 +173,46 @@ class RoboLFM25VL(RoboVLMBackbone):
             padding=padding,
         )
         return dict(inputs)
+
+    def _pack_vla_adapter_features(
+        self,
+        hidden_states: Tuple[torch.Tensor, ...],
+        image_token_mask: torch.Tensor,
+        action_token_mask: torch.Tensor,
+        num_task_tokens: int,
+        bs: int,
+        seq_len: int,
+    ) -> torch.Tensor:
+        """Pack per-layer Raw vision + ActionQuery features for Bridge Attention.
+
+        Returns ``[B, T, L, N_task + N_aq, D]`` with vision tokens zero-padded/truncated
+        to ``num_task_tokens``.
+        """
+        n_aq = int(self.latent_num)
+        dim = hidden_states[0].shape[-1]
+        n_layers = len(hidden_states)
+        packed = hidden_states[0].new_zeros(
+            bs * seq_len, n_layers, num_task_tokens + n_aq, dim
+        )
+
+        for layer_idx, hs in enumerate(hidden_states):
+            # hs: [B*T, S, D]
+            for row in range(bs * seq_len):
+                img_idx = image_token_mask[row].nonzero(as_tuple=False).flatten()
+                act_idx = action_token_mask[row].nonzero(as_tuple=False).flatten()
+                if act_idx.numel() != n_aq:
+                    raise ValueError(
+                        f"Expected {n_aq} ActionQuery tokens, got {act_idx.numel()} "
+                        f"at batch row {row}"
+                    )
+                n_img = min(int(img_idx.numel()), num_task_tokens)
+                if n_img > 0:
+                    packed[row, layer_idx, :n_img] = hs[row, img_idx[:n_img]]
+                packed[row, layer_idx, num_task_tokens : num_task_tokens + n_aq] = hs[
+                    row, act_idx
+                ]
+
+        return packed.view(bs, seq_len, n_layers, num_task_tokens + n_aq, dim)
 
     def encode_images(self, images, image_sizes=None):
         raise NotImplementedError(
@@ -367,11 +421,20 @@ class RoboLFM25VL(RoboVLMBackbone):
         multimodal_labels = None
         multimodal_attention_mask = attention_mask
 
-        if vision_gripper is not None:
-            raise NotImplementedError("hand_rgb / vision_gripper is not supported for LFM2.5-VL yet.")
+        # Wrist / secondary RGB is fused upstream via build_processor_inputs
+        # (multi-image chat). vision_gripper is unused here.
+        if vision_gripper is not None and not self.is_vla_adapter:
+            raise NotImplementedError(
+                "hand_rgb / vision_gripper requires VLA-Adapter multi-image path "
+                "(act_head.type=VLAAdapterL1Head) or build_processor_inputs(images_per_sample=2)."
+            )
 
-        if rel_state is not None and self.use_state:
+        # VLA-Adapter uses proprio on the policy side only (not injected into VLM).
+        if rel_state is not None and self.use_state and not self.is_vla_adapter:
             raise NotImplementedError("rel_state conditioning is not implemented for LFM2.5-VL yet.")
+
+        # Image-token mask before ActionQuery / depth-pred tokens are appended.
+        image_token_mask = input_ids == self.image_token_id
 
         # Depth CNN → QFormer (cross-attn over depth / image / text) → insert tokens.
         if self.use_depth and self.depth_conditioner is not None:
@@ -396,6 +459,16 @@ class RoboLFM25VL(RoboVLMBackbone):
                 self._insert_depth_tokens(
                     multimodal_embeds, multimodal_attention_mask, depth_tokens
                 )
+            )
+            n_depth_cond = depth_tokens.shape[1]
+            image_token_mask = torch.cat(
+                [
+                    image_token_mask,
+                    image_token_mask.new_zeros(
+                        image_token_mask.shape[0], n_depth_cond, dtype=torch.bool
+                    ),
+                ],
+                dim=1,
             )
 
         action_token_mask = None
@@ -424,6 +497,17 @@ class RoboLFM25VL(RoboVLMBackbone):
                 is_image=False,
                 insert_idx=multimodal_embeds.shape[1],
                 fill_zero=self.act_head_configs.get("fill_zero", False),
+            )
+            # Keep image mask aligned with the longer sequence (False on new slots).
+            n_aq = action_tokens.shape[1]
+            image_token_mask = torch.cat(
+                [
+                    image_token_mask,
+                    image_token_mask.new_zeros(
+                        image_token_mask.shape[0], n_aq, dtype=torch.bool
+                    ),
+                ],
+                dim=1,
             )
             # Append learnable depth-prediction queries after action queries.
             if self.predict_depth and self.depth_pred_token is not None:
@@ -456,12 +540,28 @@ class RoboLFM25VL(RoboVLMBackbone):
                     ],
                     dim=1,
                 )
+                image_token_mask = torch.cat(
+                    [
+                        image_token_mask,
+                        image_token_mask.new_zeros(
+                            image_token_mask.shape[0], n_depth, dtype=torch.bool
+                        ),
+                    ],
+                    dim=1,
+                )
 
         if history_type == "pre":
             multimodal_embeds = rearrange(multimodal_embeds, "(b l) n d -> b (l n) d", l=seq_len)
             if multimodal_attention_mask is not None:
                 multimodal_attention_mask = rearrange(
                     multimodal_attention_mask, "(b l) n -> b (l n)", l=seq_len)
+            if action_token_mask is not None:
+                action_token_mask = rearrange(
+                    action_token_mask, "(b l) n -> b (l n)", l=seq_len
+                )
+            image_token_mask = rearrange(
+                image_token_mask, "(b l) n -> b (l n)", l=seq_len
+            )
 
         if mode not in ("train", "val"):
             model_dtype = next(self.model.parameters()).dtype
@@ -478,26 +578,48 @@ class RoboLFM25VL(RoboVLMBackbone):
             output_hidden_states=True,
         )
 
-        output_hs = output.hidden_states[-1].clone()
-        if history_type == "pre":
-            output_hs = rearrange(output_hs, "b (l n) d -> (b l) n d", l=seq_len)
-
         depth_hs = None
-        if action_space == "continuous":
-            action_hs = output_hs[action_token_mask].reshape(bs, seq_len, self.latent_num, -1)
-            if depth_pred_token_mask is not None:
-                depth_hs = output_hs[depth_pred_token_mask].reshape(
-                    bs, seq_len, self.depth_latent_num, -1
-                )
-        elif action_space == "down_sample":
-            token_src = self.act_head_configs.get("token_source", "all")
-            if token_src != "all":
-                raise ValueError(f"Unsupported token source {token_src}")
-            action_hs = output_hs.reshape(bs, seq_len, *output_hs.shape[1:])
-        else:
-            raise ValueError(f"Unsupported action space {action_space}")
+        head_kwargs: Dict[str, Any] = {}
 
-        if self.use_clip_norm and mode == "train":
+        if self.is_vla_adapter:
+            if history_type == "pre":
+                raise NotImplementedError(
+                    "VLA-Adapter packing does not support history_type='pre'; use 'post'."
+                )
+            # Bridge Attention consumes every layer (embed + transformer blocks).
+            num_task_tokens = int(self.act_head_configs.get("num_task_tokens", 512))
+            action_hs = self._pack_vla_adapter_features(
+                output.hidden_states,
+                image_token_mask=image_token_mask,
+                action_token_mask=action_token_mask,
+                num_task_tokens=num_task_tokens,
+                bs=bs,
+                seq_len=seq_len,
+            )
+            head_kwargs["proprio"] = rel_state
+            head_kwargs["phase"] = "Training" if mode in ("train", "val") else "Inference"
+        else:
+            output_hs = output.hidden_states[-1].clone()
+            if history_type == "pre":
+                output_hs = rearrange(output_hs, "b (l n) d -> (b l) n d", l=seq_len)
+
+            if action_space == "continuous":
+                action_hs = output_hs[action_token_mask].reshape(
+                    bs, seq_len, self.latent_num, -1
+                )
+                if depth_pred_token_mask is not None:
+                    depth_hs = output_hs[depth_pred_token_mask].reshape(
+                        bs, seq_len, self.depth_latent_num, -1
+                    )
+            elif action_space == "down_sample":
+                token_src = self.act_head_configs.get("token_source", "all")
+                if token_src != "all":
+                    raise ValueError(f"Unsupported token source {token_src}")
+                action_hs = output_hs.reshape(bs, seq_len, *output_hs.shape[1:])
+            else:
+                raise ValueError(f"Unsupported action space {action_space}")
+
+        if self.use_clip_norm and mode == "train" and not self.is_vla_adapter:
             clip_loss = self.clip_norm_head(action_hs, raw_text)
             self._update_loss(loss, clip_loss, "clip")
 
@@ -507,7 +629,6 @@ class RoboLFM25VL(RoboVLMBackbone):
             if depth_hs is not None:
                 depth_hs = depth_hs.to(dtype=head_dtype)
 
-        head_kwargs = {}
         if depth_hs is not None:
             head_kwargs["depth_hs"] = depth_hs
         # GT depth for aux loss (also used as conditioner input when use_depth=True).

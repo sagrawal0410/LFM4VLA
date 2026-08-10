@@ -228,29 +228,49 @@ class BaseTrainer(pl.LightningModule):
             return value.detach().float().mean()
         return float(value)
 
+    def _frame_to_pil(self, frame: torch.Tensor):
+        from torchvision.transforms.functional import to_pil_image
+
+        frame = frame.cpu()
+        if frame.dtype.is_floating_point:
+            frame = frame.clamp(0, 255).to(torch.uint8)
+        else:
+            frame = frame.to(torch.uint8)
+        return to_pil_image(frame)
+
     def _build_language_inputs(self, batch, rgb):
         seq_len = self.configs["window_size"]
 
         if isinstance(batch["text"], list) and isinstance(batch["text"][0], str):
-            assert not self.use_hand_rgb
-            from torchvision.transforms.functional import to_pil_image
+            hand_rgb = batch.get("hand_rgb")
+            images_per_sample = 1
+            if self.use_hand_rgb:
+                if hand_rgb is None:
+                    raise ValueError(
+                        "use_hand_rgb=True but batch has no hand_rgb. "
+                        "Set train_dataset.load_wrist=true."
+                    )
+                images_per_sample = 2
 
             image_inputs = []
             texts = []
             for i in range(rgb.shape[0]):
                 for j in range(seq_len):
-                    frame = rgb[i][j].cpu()
-                    if frame.dtype.is_floating_point:
-                        frame = frame.clamp(0, 255).to(torch.uint8)
-                    else:
-                        frame = frame.to(torch.uint8)
-                    image_inputs.append(to_pil_image(frame))
+                    image_inputs.append(self._frame_to_pil(rgb[i][j]))
+                    if images_per_sample == 2:
+                        image_inputs.append(self._frame_to_pil(hand_rgb[i][j]))
                     texts.append(batch["text"][i])
 
             image_inputs = self.model.process_vision_info(image_inputs)
             if hasattr(self.model, "build_processor_inputs"):
-                inputs = self.model.build_processor_inputs(texts, image_inputs)
+                inputs = self.model.build_processor_inputs(
+                    texts, image_inputs, images_per_sample=images_per_sample
+                )
             else:
+                if images_per_sample != 1:
+                    raise NotImplementedError(
+                        "Multi-image batches require model.build_processor_inputs."
+                    )
                 if hasattr(self.model, "tokenizer"):
                     self.model.tokenizer.padding_side = "right"
                 inputs = self.model.processor(
@@ -337,6 +357,10 @@ class BaseTrainer(pl.LightningModule):
         if chunck_mask is not None:
             chunck_mask = chunck_mask.to(self.device)
 
+        rel_state = batch.get("rel_state")
+        if rel_state is not None:
+            rel_state = rel_state.to(self.device)
+
         return {
             "rgb": rgb,
             "hand_rgb": hand_rgb,
@@ -348,7 +372,7 @@ class BaseTrainer(pl.LightningModule):
             "gripper_action_chunck": gripper_action_chunck,
             "chunck_mask": chunck_mask,
             "raw_text": batch.get("raw_text"),
-            "rel_state": batch.get("rel_state"),
+            "rel_state": rel_state,
             "data_source": batch.get("data_source", "calvin_action"),
         }
 

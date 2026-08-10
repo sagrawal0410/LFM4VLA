@@ -359,10 +359,25 @@ class RoboVLMBackbone(nn.Module):
 
         if hasattr(continuous_policy, head_type):
             return getattr(continuous_policy, head_type)
+        import models.vla_adapter_policy as vla_adapter_policy
+
+        if hasattr(vla_adapter_policy, head_type):
+            return getattr(vla_adapter_policy, head_type)
         raise AttributeError(
             f"Unknown act_head type '{head_type}'. "
-            "Expected a class in models.base_policy or models.continuous_policy."
+            "Expected a class in models.base_policy, continuous_policy, or vla_adapter_policy."
         )
+
+    def _vlm_num_hidden_layers(self) -> int:
+        """Number of transformer layers in the text backbone (LFM / generic HF)."""
+        cfg = self.model.config
+        text_cfg = getattr(cfg, "text_config", cfg)
+        for key in ("num_hidden_layers", "num_layers", "n_layer"):
+            if hasattr(text_cfg, key):
+                return int(getattr(text_cfg, key))
+            if isinstance(text_cfg, dict) and key in text_cfg:
+                return int(text_cfg[key])
+        raise ValueError("Could not resolve VLM num_hidden_layers from model config.")
 
     def _init_heads(self):
         action_head = None
@@ -409,6 +424,29 @@ class RoboVLMBackbone(nn.Module):
                     "depth_map_size", int(self.act_head_configs.get("depth_map_size", 56))
                 )
                 self.depth_latent_num = int(_kwargs["depth_latent"])
+            if head_type == "VLAAdapterL1Head":
+                _kwargs.setdefault("num_blocks", self._vlm_num_hidden_layers())
+                _kwargs.setdefault(
+                    "num_task_tokens",
+                    int(self.act_head_configs.get("num_task_tokens", 512)),
+                )
+                _kwargs.setdefault(
+                    "num_action_tokens",
+                    int(
+                        self.act_head_configs.get(
+                            "num_action_tokens", self.latent_num
+                        )
+                    ),
+                )
+                _kwargs.setdefault(
+                    "use_pro_version",
+                    bool(self.act_head_configs.get("use_pro_version", True)),
+                )
+                _kwargs.setdefault(
+                    "proprio_dim", int(self.act_head_configs.get("proprio_dim", 8))
+                )
+                # Chunk length comes from the top-level config (already in _kwargs).
+                _kwargs["fwd_pred_next_n"] = int(self.fwd_pred_next_n)
             _cls = self._resolve_action_head_cls(head_type)
             action_head = _cls(**_kwargs)
 
@@ -540,6 +578,13 @@ class RoboVLMBackbone(nn.Module):
             )
 
         return action, action_loss, depth_pred
+
+    @property
+    def is_vla_adapter(self) -> bool:
+        return (
+            self.act_head_configs is not None
+            and self.act_head_configs.get("type") == "VLAAdapterL1Head"
+        )
 
     @staticmethod
     def _format_loss(loss):
@@ -750,6 +795,7 @@ class RoboVLMBackbone(nn.Module):
             action_mask=action_mask,
             vision_gripper=vision_gripper,
             raw_text=raw_text,
+            rel_state=rel_state,
             mode=mode,
             **kwargs,
         )
@@ -768,6 +814,7 @@ class RoboVLMBackbone(nn.Module):
         past_key_values=None,
         use_cache: bool = False,
         vision_gripper=None,
+        rel_state=None,
         **kwargs,
     ):
         assert vision_x is not None
@@ -776,6 +823,7 @@ class RoboVLMBackbone(nn.Module):
             lang_x,
             attention_mask,
             vision_gripper=vision_gripper,
+            rel_state=rel_state,
             mode="inference",
             **kwargs,
         )

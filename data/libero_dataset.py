@@ -63,6 +63,8 @@ class LiberoRLDSDataset(IterableDataset):
         norm_max: float = 1.0,
         data_source: str = "libero_action",
         load_depth: bool = False,
+        load_wrist: bool = False,
+        load_proprio: bool = False,
         batch_size: int = 1,
         cache_refresh_every_n_steps: Optional[int] = None,
         **kwargs: Any,
@@ -77,6 +79,8 @@ class LiberoRLDSDataset(IterableDataset):
         self.norm_max = norm_max
         self.data_source = data_source
         self.load_depth = bool(load_depth)
+        self.load_wrist = bool(load_wrist)
+        self.load_proprio = bool(load_proprio)
         self.image_size = int(image_size)
         self.train = bool(train)
         self.batch_size = max(int(batch_size), 1)
@@ -127,12 +131,13 @@ class LiberoRLDSDataset(IterableDataset):
         from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 
         mixture_spec = OXE_NAMED_MIXTURES.get(self._data_mix, [(self._data_mix, 1.0)])
+        camera_views = ("primary", "wrist") if self.load_wrist else ("primary",)
         per_dataset_kwargs, weights = get_oxe_dataset_kwargs_and_weights(
             self._data_root_dir,
             mixture_spec,
-            load_camera_views=("primary",),  # agentview only; wrist not fed to the model
+            load_camera_views=camera_views,
             load_depth=self.load_depth,
-            load_proprio=False,
+            load_proprio=self.load_proprio,
             load_language=True,
             action_proprio_normalization_type=NormalizationType.BOUNDS_Q99,
         )
@@ -253,6 +258,29 @@ class LiberoRLDSDataset(IterableDataset):
             "action_mask": action_mask,
             "lang": lang,
         }
+        if self.load_wrist:
+            if "image_wrist" not in frame["observation"]:
+                raise KeyError(
+                    "load_wrist=True but observation has no 'image_wrist'. "
+                    "Ensure the RLDS demos include eye-in-hand RGB."
+                )
+            wrist = np.asarray(frame["observation"]["image_wrist"])
+            if wrist.ndim == 3:
+                wrist = wrist[None]
+            sample["hand_rgb"] = self.image_fn(
+                [Image.fromarray(img) for img in wrist]
+            )
+        if self.load_proprio:
+            if "proprio" not in frame["observation"]:
+                raise KeyError(
+                    "load_proprio=True but observation has no 'proprio'."
+                )
+            proprio = np.asarray(frame["observation"]["proprio"], dtype=np.float32)
+            # Windowed proprio [W, D] → current frame (last in the observation window).
+            if proprio.ndim == 1:
+                sample["proprio"] = proprio
+            else:
+                sample["proprio"] = proprio[min(self.window_size, proprio.shape[0]) - 1]
         if self.load_depth:
             if "depth_primary" not in frame["observation"]:
                 raise KeyError(
@@ -304,6 +332,14 @@ class LiberoRLDSDataset(IterableDataset):
             "raw_text": stacked_language,
             "data_source": self.data_source,
         }
+        if self.load_wrist:
+            out["hand_rgb"] = torch.stack([s["hand_rgb"] for s in sample])[
+                :, : self.window_size
+            ]
+        if self.load_proprio:
+            out["rel_state"] = torch.from_numpy(
+                np.stack([s["proprio"] for s in sample])
+            ).float()
         if self.load_depth:
             out["depth"] = torch.stack([s["depth"] for s in sample])[:, : self.window_size]
         return out

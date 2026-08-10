@@ -16,10 +16,10 @@ import torch
 
 
 def uses_he_action_layout(act_head_configs: Optional[dict]) -> bool:
-    """True when HE / continuous-head multi-token layout should be used."""
+    """True when HE / continuous-head / VLA-Adapter multi-token layout should be used."""
     if not act_head_configs:
         return False
-    if act_head_configs.get("type") == "FCContinuousDecoder":
+    if act_head_configs.get("type") in ("FCContinuousDecoder", "VLAAdapterL1Head"):
         return True
     return "num_action_tokens" in act_head_configs
 

@@ -268,6 +268,41 @@ def _get_agentview(obs) -> np.ndarray:
     return np.asarray(obs["agentview_image"])
 
 
+def _get_wrist(obs) -> np.ndarray:
+    """Extract eye-in-hand RGB from a LIBERO observation dict."""
+    for key in ("robot0_eye_in_hand_image", "eye_in_hand_image", "wrist_image"):
+        if key in obs:
+            return np.asarray(obs[key])
+    raise KeyError(
+        "No wrist camera in observation; expected robot0_eye_in_hand_image."
+    )
+
+
+def _get_proprio(obs) -> np.ndarray:
+    """Build 8-D proprio matching RLDS: EEF(6) + pad(1) + gripper(1).
+
+    EEF is ``[x,y,z, axangle]`` as in LIBERO HDF5 demos (robosuite quat2axisangle).
+    """
+    if "robot0_eef_pos" in obs and "robot0_eef_quat" in obs:
+        from robosuite.utils.transform_utils import quat2axisangle
+
+        pos = np.asarray(obs["robot0_eef_pos"], dtype=np.float32).reshape(3)
+        axangle = np.asarray(
+            quat2axisangle(obs["robot0_eef_quat"]), dtype=np.float32
+        ).reshape(3)
+        eef = np.concatenate([pos, axangle], axis=0)
+    else:
+        raise KeyError("No robot0_eef_pos/quat in observation for proprio.")
+
+    grip = obs.get("robot0_gripper_qpos", obs.get("gripper_qpos"))
+    if grip is None:
+        grip_v = np.zeros(1, dtype=np.float32)
+    else:
+        grip = np.asarray(grip, dtype=np.float32).reshape(-1)
+        grip_v = grip[-1:].astype(np.float32)
+    return np.concatenate([eef, np.zeros(1, dtype=np.float32), grip_v], axis=0)
+
+
 def _get_agentview_depth(obs, env) -> np.ndarray:
     """Extract metric-normalized agentview depth ``[H, W]`` float32."""
     from utils.libero_depth import extract_agentview_depth
@@ -284,6 +319,8 @@ def rollout(env, model, task, init_state, out_dir, task_i, ep_i, execute_step,
     model.reset()
 
     use_depth = bool(getattr(model, "use_depth", False))
+    use_hand_rgb = bool(getattr(model, "use_hand_rgb", False))
+    use_proprio = bool(getattr(model, "use_proprio", False))
 
     # LIBERO physics settle: step a few no-op actions before control starts.
     dummy = np.zeros(7, dtype=np.float32)
@@ -301,10 +338,19 @@ def rollout(env, model, task, init_state, out_dir, task_i, ep_i, execute_step,
         for step_i in range(max_steps):
             frame = _get_agentview(obs)
             depth = _get_agentview_depth(obs, env) if use_depth else None
+            wrist = _get_wrist(obs) if use_hand_rgb else None
+            proprio = _get_proprio(obs) if use_proprio else None
             if recorder is not None:
                 # Record the human-viewable frame (rot180 to undo robosuite flip).
                 recorder.add(np.ascontiguousarray(frame[::-1, ::-1]))
-            action = model.step(frame, instruction, execute_step=execute_step, depth=depth)
+            action = model.step(
+                frame,
+                instruction,
+                execute_step=execute_step,
+                depth=depth,
+                wrist_image=wrist,
+                proprio=proprio,
+            )
             obs, reward, done, info = env.step(action.tolist())
             if live_render:
                 env.env.render()

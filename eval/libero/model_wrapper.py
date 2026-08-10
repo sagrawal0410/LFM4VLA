@@ -61,11 +61,16 @@ def load_action_stats(data_root_dir: str, dataset_name: str) -> dict:
     with open(sorted(matches)[0]) as f:
         stats = json.load(f)
     action = stats["action"] if "action" in stats else stats
-    return {
+    out = {
         "q01": np.asarray(action["q01"], dtype=np.float32),
         "q99": np.asarray(action["q99"], dtype=np.float32),
         "path": sorted(matches)[0],
     }
+    proprio = stats.get("proprio")
+    if isinstance(proprio, dict) and "q01" in proprio and "q99" in proprio:
+        out["proprio_q01"] = np.asarray(proprio["q01"], dtype=np.float32)
+        out["proprio_q99"] = np.asarray(proprio["q99"], dtype=np.float32)
+    return out
 
 
 class LFMLiberoModel:
@@ -99,9 +104,21 @@ class LFMLiberoModel:
         # Aux depth-map head (HierarchicalFCDecoder). No GT depth needed at eval.
         self.predict_depth = bool(configs.get("predict_depth", False))
         self.log_depth_pred = bool(configs.get("log_depth_pred", True)) and self.predict_depth
+        self.use_hand_rgb = bool(configs.get("use_hand_rgb", False))
+        self.use_proprio = bool(
+            configs.get("use_state", False)
+            or configs.get("train_dataset", {}).get("load_proprio", False)
+            or configs.get("act_head", {}).get("type") == "VLAAdapterL1Head"
+        )
+        self.is_vla_adapter = (
+            configs.get("act_head", {}).get("type") == "VLAAdapterL1Head"
+        )
+        self.proprio_dim = int(configs.get("act_head", {}).get("proprio_dim", 8))
 
         self.q01 = action_stats["q01"]
         self.q99 = action_stats["q99"]
+        self.proprio_q01 = action_stats.get("proprio_q01")
+        self.proprio_q99 = action_stats.get("proprio_q99")
         # Model emits arm in [norm_min, norm_max]; RLDS used [-1, 1].
         self.norm_min = norm_min
         self.norm_max = norm_max
@@ -127,6 +144,8 @@ class LFMLiberoModel:
         instruction: str,
         execute_step: int = 1,
         depth: np.ndarray | None = None,
+        wrist_image: np.ndarray | None = None,
+        proprio: np.ndarray | None = None,
     ) -> np.ndarray:
         """Return one 7-D LIBERO action for the current agentview frame.
 
@@ -137,11 +156,23 @@ class LFMLiberoModel:
         assert 1 <= execute_step <= self.fwd_pred_next_n
 
         if execute_step == 1:
-            chunk = self._predict_chunk(image, instruction, depth=depth)
+            chunk = self._predict_chunk(
+                image,
+                instruction,
+                depth=depth,
+                wrist_image=wrist_image,
+                proprio=proprio,
+            )
             action = chunk[0]
         else:
             if not self._chunk_buffer or self._steps_since_replan >= execute_step:
-                chunk = self._predict_chunk(image, instruction, depth=depth)
+                chunk = self._predict_chunk(
+                    image,
+                    instruction,
+                    depth=depth,
+                    wrist_image=wrist_image,
+                    proprio=proprio,
+                )
                 self._chunk_buffer = list(chunk[:execute_step])
                 self._steps_since_replan = 0
             action = self._chunk_buffer.pop(0)
@@ -149,6 +180,28 @@ class LFMLiberoModel:
 
         self.emitted_actions.append(action.copy())
         return self._to_libero_action(action)
+
+    def _normalize_proprio(self, proprio: np.ndarray) -> np.ndarray:
+        proprio = np.asarray(proprio, dtype=np.float32).reshape(-1)
+        if proprio.shape[0] != self.proprio_dim:
+            # Match RLDS layout: EEF(6) + pad(1) + gripper(1).
+            if proprio.shape[0] >= 7:
+                eef = proprio[:6]
+                grip = proprio[-1:]
+                proprio = np.concatenate([eef, np.zeros(1, dtype=np.float32), grip])
+            else:
+                raise ValueError(
+                    f"proprio has dim {proprio.shape[0]}, expected {self.proprio_dim}"
+                )
+        if self.proprio_q01 is not None and self.proprio_q99 is not None:
+            q01 = self.proprio_q01
+            q99 = self.proprio_q99
+            proprio = np.clip(
+                2 * (proprio - q01) / (q99 - q01 + 1e-8) - 1,
+                -1,
+                1,
+            ).astype(np.float32)
+        return proprio
 
     def action_stats(self) -> dict:
         """Per-dim std of raw (normalized) emitted actions — flags a frozen policy."""
@@ -188,6 +241,8 @@ class LFMLiberoModel:
         image: np.ndarray,
         instruction: str,
         depth: np.ndarray | None = None,
+        wrist_image: np.ndarray | None = None,
+        proprio: np.ndarray | None = None,
     ) -> np.ndarray:
         img = self._preprocess_image(image)
         pil = Image.fromarray(img).convert("RGB").resize(
@@ -197,6 +252,20 @@ class LFMLiberoModel:
         rgb = rgb.unsqueeze(0).unsqueeze(0)  # [B=1, T=1, C, H, W]
 
         batch = {"rgb": rgb, "text": [instruction]}
+        if self.use_hand_rgb:
+            if wrist_image is None:
+                raise ValueError("use_hand_rgb=True but no wrist_image was passed.")
+            wrist = self._preprocess_image(wrist_image)
+            wrist_pil = Image.fromarray(wrist).convert("RGB").resize(
+                (self.image_size, self.image_size), Image.BILINEAR
+            )
+            wrist_t = self.trainer.model.image_processor(wrist_pil)
+            batch["hand_rgb"] = wrist_t.unsqueeze(0).unsqueeze(0)
+        if self.use_proprio:
+            if proprio is None:
+                raise ValueError("use_proprio=True but no proprio was passed.")
+            proprio_n = self._normalize_proprio(proprio)
+            batch["rel_state"] = torch.from_numpy(proprio_n).float().unsqueeze(0)
         # Input-side depth conditioning only (use_depth). predict_depth does not need GT.
         if self.use_depth:
             if depth is None:
@@ -239,7 +308,7 @@ class LFMLiberoModel:
 
         if isinstance(pred, (tuple, list)):
             arm, grip = pred
-            grip = torch.sigmoid(grip)  # head emits logits; -> P(open)
+            grip = torch.sigmoid(grip)  # FCDecoder emits logits; -> P(open)
             if grip.ndim == arm.ndim - 1:
                 grip = grip.unsqueeze(-1)
             action = torch.cat([arm, grip], dim=-1)
@@ -259,8 +328,8 @@ class LFMLiberoModel:
         out = np.empty(7, dtype=np.float32)
         out[:6] = arm
 
-        # Gripper: P(open) -> robosuite command. Default: open -> -1, close -> +1.
-        prob_open = action[6]
+        # Gripper: P(open) / continuous openness -> robosuite. Default: open -> -1.
+        prob_open = float(action[6])
         if self.gripper_open_is_negative:
             out[6] = -1.0 if prob_open > 0.5 else 1.0
         else:
