@@ -23,7 +23,8 @@ case "$SUITE" in
   object)  CONFIG="configs/lfm2.5-vl-450m-vla-adapter-libero-object.json" ;;
   goal)    CONFIG="configs/lfm2.5-vl-450m-vla-adapter-libero-goal.json" ;;
   long)    CONFIG="configs/lfm2.5-vl-450m-vla-adapter-libero-long.json" ;;
-  *) echo "Unknown SUITE=$SUITE (expected spatial|object|goal|long)"; exit 1 ;;
+  all4)    CONFIG="configs/lfm2.5-vl-450m-vla-adapter-libero-all4.json" ;;
+  *) echo "Unknown SUITE=$SUITE (expected spatial|object|goal|long|all4)"; exit 1 ;;
 esac
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
