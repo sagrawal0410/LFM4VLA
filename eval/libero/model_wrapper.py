@@ -184,15 +184,11 @@ class LFMLiberoModel:
     def _normalize_proprio(self, proprio: np.ndarray) -> np.ndarray:
         proprio = np.asarray(proprio, dtype=np.float32).reshape(-1)
         if proprio.shape[0] != self.proprio_dim:
-            # Match RLDS layout: EEF(6) + pad(1) + gripper(1).
-            if proprio.shape[0] >= 7:
-                eef = proprio[:6]
-                grip = proprio[-1:]
-                proprio = np.concatenate([eef, np.zeros(1, dtype=np.float32), grip])
-            else:
-                raise ValueError(
-                    f"proprio has dim {proprio.shape[0]}, expected {self.proprio_dim}"
-                )
+            raise ValueError(
+                f"proprio has dim {proprio.shape[0]}, expected {self.proprio_dim}. "
+                "Build it with eval.libero.evaluate_libero._get_proprio "
+                "(EEF(6) + pad(1) + gripper(2) = 9 for LIBERO)."
+            )
         if self.proprio_q01 is not None and self.proprio_q99 is not None:
             q01 = self.proprio_q01
             q99 = self.proprio_q99

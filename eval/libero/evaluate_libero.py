@@ -279,8 +279,11 @@ def _get_wrist(obs) -> np.ndarray:
 
 
 def _get_proprio(obs) -> np.ndarray:
-    """Build 8-D proprio matching RLDS: EEF(6) + pad(1) + gripper(1).
+    """Build 9-D proprio matching the RLDS pipeline: EEF(6) + pad(1) + gripper(2).
 
+    Mirrors ``libero_dataset_transform``: ``EEF_state = state[:, :6]`` and a **2-D**
+    ``gripper_state = state[:, -2:]``, with one zero-pad slot inserted between them
+    (``state_obs_keys = ["EEF_state", None, "gripper_state"]``).
     EEF is ``[x,y,z, axangle]`` as in LIBERO HDF5 demos (robosuite quat2axisangle).
     """
     if "robot0_eef_pos" in obs and "robot0_eef_quat" in obs:
@@ -296,10 +299,13 @@ def _get_proprio(obs) -> np.ndarray:
 
     grip = obs.get("robot0_gripper_qpos", obs.get("gripper_qpos"))
     if grip is None:
-        grip_v = np.zeros(1, dtype=np.float32)
+        grip_v = np.zeros(2, dtype=np.float32)
     else:
         grip = np.asarray(grip, dtype=np.float32).reshape(-1)
-        grip_v = grip[-1:].astype(np.float32)
+        # 2-D gripper qpos (both finger joints); pad if the sim reports fewer.
+        grip_v = grip[-2:].astype(np.float32)
+        if grip_v.shape[0] < 2:
+            grip_v = np.pad(grip_v, (2 - grip_v.shape[0], 0))
     return np.concatenate([eef, np.zeros(1, dtype=np.float32), grip_v], axis=0)
 
 
