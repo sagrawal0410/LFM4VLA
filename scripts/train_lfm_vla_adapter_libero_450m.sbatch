@@ -33,7 +33,7 @@ case "$SUITE" in
 esac
 
 if [[ ! -f "$LFM4VLA_ROOT/$CONFIG" ]]; then
-  echo "Config not found: $CONFIG (DEPTH=$DEPTH). Are you on the branch that has it?"; exit 1
+  echo "Config not found: $CONFIG (SUITE=$SUITE DEPTH=$DEPTH)"; exit 1
 fi
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
