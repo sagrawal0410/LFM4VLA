@@ -10,6 +10,10 @@
 #     whose generated *_pb2.py were built with protoc 5.x (needs protobuf>=5.26).
 #     Pinning tensorflow-metadata==1.14.0 uses protoc 3.x protos -> no runtime_version.
 #   - Do NOT upgrade protobuf to 4.x/5.x; that breaks TF 2.15.
+#
+# The same pins live in constraints.txt. Pass that to any later pip install into
+# this env (``pip install -c constraints.txt <pkg>``) so nothing bumps NumPy to
+# 2.x. If it drifts anyway: bash scripts/repair_env_pins.sh
 
 numpy==1.26.4
 protobuf==3.20.3

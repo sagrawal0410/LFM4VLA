@@ -50,6 +50,9 @@ export WANDB_MODE="${WANDB_MODE:-online}"
 
 echo "[vla-adapter] suite=$SUITE depth=$DEPTH config=$CONFIG"
 
+# Fail fast on a drifted NumPy/protobuf/TF pin set rather than dying mid-import.
+python scripts/check_env_pins.py
+
 srun python main.py \
   --config "$CONFIG" \
   --output_root "$OUTPUT_ROOT" \

@@ -1,0 +1,23 @@
+# Authoritative pin set for the LIBERO/RLDS training env (conda env: lfm4vla).
+#
+# Pass this to EVERY pip install into that env so a transitive dependency can
+# never bump one of these and break the TensorFlow data pipeline:
+#   pip install -c constraints.txt <anything>
+#
+# Why each pin matters:
+#   numpy 1.26.4     TF 2.15 + ml_dtypes are built against the NumPy 1.x ABI.
+#                    NumPy 2 => "ImportError: numpy.core.umath failed to import".
+#   protobuf 3.20.3  TF 2.15 does not work with protobuf 4.x/5.x.
+#   tf-metadata      Newer builds generate *_pb2.py with protoc 5.x, which need
+#     1.14.0         google.protobuf.runtime_version (protobuf>=5.26 only).
+#   ml-dtypes <0.4   0.4+ targets NumPy 2 / newer TF.
+#   opencv 4.10      OpenCV 5.x requires NumPy>=2.
+
+numpy==1.26.4
+protobuf==3.20.3
+tensorflow==2.15.0
+tensorflow-metadata==1.14.0
+tensorflow-datasets==4.9.3
+ml-dtypes>=0.2.0,<0.4.0
+opencv-python==4.10.0.84
+opencv-python-headless==4.10.0.84

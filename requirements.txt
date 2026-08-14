@@ -1,9 +1,17 @@
+# Core PyTorch/LFM training deps.
+#
+# NumPy MUST stay on 1.x: TF 2.15 and ml_dtypes ship C extensions built against
+# the NumPy 1.x ABI, and NumPy 2 breaks them with
+# "ImportError: numpy.core.umath failed to import".
+# Install with the shared pin set so nothing silently upgrades it:
+#   pip install -c constraints.txt -r requirements.txt
+
 torch
 lightning
 transformers
 einops
 omegaconf
 pillow
-numpy
+numpy>=1.26,<2
 safetensors
 wandb
