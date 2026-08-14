@@ -67,6 +67,7 @@ class LiberoRLDSDataset(IterableDataset):
         load_proprio: bool = False,
         batch_size: int = 1,
         cache_refresh_every_n_steps: Optional[int] = None,
+        cache_shuffle_buffer: Optional[bool] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -90,14 +91,23 @@ class LiberoRLDSDataset(IterableDataset):
         self._data_mix = data_mix
         self._image_aug = bool(image_aug)
         self._shuffle_buffer_size = int(shuffle_buffer_size)
-        if self.load_depth and not self.train:
+
+        # Pin the shuffle window in host RAM (TF .cache) instead of TF's streaming
+        # repeat->shuffle, whose host RAM grows unbounded (the "shuffle-buffer leak").
+        # Default-on for depth; opt-in for any run (e.g. multi-cam VLA-Adapter) via
+        # cache_shuffle_buffer=True in the dataset config.
+        if cache_shuffle_buffer is None:
+            cache_shuffle_buffer = self.load_depth
+        self._cache_shuffle_buffer = bool(cache_shuffle_buffer)
+
+        if self._cache_shuffle_buffer and not self.train:
             # Val stays tiny; train cache size comes from config (tens of thousands OK).
             self._shuffle_buffer_size = min(self._shuffle_buffer_size, 256)
 
         # Rotating cache: train on a pinned window for K optimizer steps, then
-        # skip ahead and materialize a new window. Default-on for depth train.
-        # Set cache_refresh_every_n_steps=0 to pin one large window for the whole run.
-        if cache_refresh_every_n_steps is None and self.load_depth and self.train:
+        # skip ahead and materialize a new window. Default-on whenever the shuffle
+        # buffer is cached. Set cache_refresh_every_n_steps=0 to pin one window forever.
+        if cache_refresh_every_n_steps is None and self._cache_shuffle_buffer and self.train:
             cache_refresh_every_n_steps = 5000
         self.cache_refresh_every_n_steps = (
             int(cache_refresh_every_n_steps)
@@ -114,9 +124,9 @@ class LiberoRLDSDataset(IterableDataset):
         self.dataset, self.dataset_length, self.dataset_statistics = self._build_rlds(
             cache_offset=0
         )
-        if self.load_depth and self.train and self._cache_refresh_every_n_samples:
+        if self._cache_shuffle_buffer and self.train and self._cache_refresh_every_n_samples:
             print(
-                f"[libero-depth] rotating cache: N={self._shuffle_buffer_size} frames, "
+                f"[libero-cache] rotating cache: N={self._shuffle_buffer_size} frames, "
                 f"refresh every {self.cache_refresh_every_n_steps} steps "
                 f"({self._cache_refresh_every_n_samples} samples, bs={self.batch_size})",
                 flush=True,
@@ -188,8 +198,8 @@ class LiberoRLDSDataset(IterableDataset):
             traj_transform_threads=len(mixture_spec),
             traj_read_threads=len(mixture_spec),
             train=self.train,
-            # Pin shuffle window in RAM for depth to stop the TF shuffle leak.
-            cache_shuffle_buffer=bool(self.load_depth),
+            # Pin shuffle window in RAM to stop the TF shuffle-buffer host-RAM leak.
+            cache_shuffle_buffer=self._cache_shuffle_buffer,
             cache_offset=int(cache_offset),
         )
         return make_interleaved_dataset(**rlds_config)
@@ -199,7 +209,7 @@ class LiberoRLDSDataset(IterableDataset):
         self._cache_window_idx += 1
         offset = self._cache_window_idx * self._shuffle_buffer_size
         print(
-            f"[libero-depth] cache refresh #{self._cache_window_idx}: "
+            f"[libero-cache] cache refresh #{self._cache_window_idx}: "
             f"skip={offset} take={self._shuffle_buffer_size}",
             flush=True,
         )

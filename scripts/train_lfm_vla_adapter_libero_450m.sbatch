@@ -4,6 +4,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-gpu=12
+#SBATCH --mem=96G
 #SBATCH --output=output_lfm_vla_adapter_libero_%j.out
 #SBATCH --error=output_lfm_vla_adapter_libero_%j.err
 
@@ -12,20 +13,28 @@ set -euo pipefail
 # --- edit these for your cluster layout ---
 LFM4VLA_ROOT="${LFM4VLA_ROOT:-$HOME/LFM4VLA}"
 CONDA_ENV="${CONDA_ENV:-lfm4vla}"
-# One of: spatial | object | goal | long
+# One of: spatial | object | goal | long | all4
 SUITE="${SUITE:-spatial}"
+# DEPTH=1 -> depth-conditioned adapter configs; DEPTH=0 (default) -> RGB-only.
+DEPTH="${DEPTH:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/home/teams/research/robotics/checkpoints}"
 LOG_ROOT="${LOG_ROOT:-/home/teams/research/robotics/logs}"
 CACHE_ROOT="${CACHE_ROOT:-/home/teams/research/robotics/cache}"
 
+if [[ "$DEPTH" == "1" ]]; then
+  PREFIX="configs/lfm2.5-vl-450m-vla-adapter-depth-libero"
+else
+  PREFIX="configs/lfm2.5-vl-450m-vla-adapter-libero"
+fi
+
 case "$SUITE" in
-  spatial) CONFIG="configs/lfm2.5-vl-450m-vla-adapter-libero-spatial.json" ;;
-  object)  CONFIG="configs/lfm2.5-vl-450m-vla-adapter-libero-object.json" ;;
-  goal)    CONFIG="configs/lfm2.5-vl-450m-vla-adapter-libero-goal.json" ;;
-  long)    CONFIG="configs/lfm2.5-vl-450m-vla-adapter-libero-long.json" ;;
-  all4)    CONFIG="configs/lfm2.5-vl-450m-vla-adapter-libero-all4.json" ;;
+  spatial|object|goal|long|all4) CONFIG="${PREFIX}-${SUITE}.json" ;;
   *) echo "Unknown SUITE=$SUITE (expected spatial|object|goal|long|all4)"; exit 1 ;;
 esac
+
+if [[ ! -f "$LFM4VLA_ROOT/$CONFIG" ]]; then
+  echo "Config not found: $CONFIG (DEPTH=$DEPTH). Are you on the branch that has it?"; exit 1
+fi
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
@@ -36,8 +45,10 @@ conda activate "$CONDA_ENV"
 
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
+# Guarantee online W&B logging (set WANDB_API_KEY in your shell/rc beforehand).
+export WANDB_MODE="${WANDB_MODE:-online}"
 
-echo "[vla-adapter] suite=$SUITE config=$CONFIG"
+echo "[vla-adapter] suite=$SUITE depth=$DEPTH config=$CONFIG"
 
 srun python main.py \
   --config "$CONFIG" \

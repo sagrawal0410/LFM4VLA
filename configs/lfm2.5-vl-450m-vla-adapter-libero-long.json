@@ -102,7 +102,9 @@
         "data_mix": "libero_10_no_noops",
         "image_size": 224,
         "image_aug": true,
-        "shuffle_buffer_size": 51200,
+        "shuffle_buffer_size": 16384,
+        "cache_shuffle_buffer": true,
+        "cache_refresh_every_n_steps": 5000,
         "load_wrist": true,
         "load_proprio": true,
         "train": true
