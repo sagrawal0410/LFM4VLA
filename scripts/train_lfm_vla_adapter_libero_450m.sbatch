@@ -22,6 +22,13 @@ LOG_ROOT="${LOG_ROOT:-/home/teams/research/robotics/logs}"
 CACHE_ROOT="${CACHE_ROOT:-/home/teams/research/robotics/cache}"
 
 if [[ "$DEPTH" == "1" ]]; then
+  # Depth RLDS only exists for libero_10 (LIBERO-Long); the other suites were
+  # never regenerated with agentview depth. See scripts/build_libero_rlds_depth.sbatch.
+  if [[ "$SUITE" != "long" ]]; then
+    echo "DEPTH=1 supports SUITE=long only (depth RLDS = libero_10_no_noops)." >&2
+    echo "To add a suite: build it with scripts/build_libero_rlds_depth.sbatch first." >&2
+    exit 1
+  fi
   PREFIX="configs/lfm2.5-vl-450m-vla-adapter-depth-libero"
 else
   PREFIX="configs/lfm2.5-vl-450m-vla-adapter-libero"
