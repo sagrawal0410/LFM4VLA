@@ -152,6 +152,19 @@ class LiberoRLDSDataset(IterableDataset):
             action_proprio_normalization_type=NormalizationType.BOUNDS_Q99,
         )
 
+        # LIBERO only has agentview (primary) depth. Requesting the wrist view
+        # leaves depth_obs_keys["wrist"]=None, which RLDS fills with a *string*
+        # padding tensor; decode_and_resize then builds a tf.cond whose branches
+        # disagree on rank, and dlimp's resize_depth_image fails with
+        # "Cannot take the length of shape with unknown rank". Drop empty views.
+        if self.load_depth:
+            for kwargs in per_dataset_kwargs:
+                depth_keys = kwargs.get("depth_obs_keys")
+                if depth_keys:
+                    kwargs["depth_obs_keys"] = {
+                        k: v for k, v in depth_keys.items() if v is not None
+                    }
+
         # Depth float32 maps make TF frame transforms + shuffle much heavier than RGB.
         parallel = 2 if self.load_depth else 16
         frame_transform_kwargs: Dict[str, Any] = dict(
