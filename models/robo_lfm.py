@@ -38,6 +38,9 @@ class RoboLFM25VL(RoboVLMBackbone):
     MAX_IMAGE_TOKENS = 256
     DO_IMAGE_SPLITTING = True
 
+    # Set once if Bridge Attention has to drop task tokens (see _pack_vla_adapter_features).
+    _warned_task_trunc = False
+
     # ------------------------------------------------------------------
     # Model structure accessors (Lfm2VlForConditionalGeneration layout)
     # ------------------------------------------------------------------
@@ -205,6 +208,14 @@ class RoboLFM25VL(RoboVLMBackbone):
                         f"Expected {n_aq} ActionQuery tokens, got {act_idx.numel()} "
                         f"at batch row {row}"
                     )
+                if int(img_idx.numel()) > num_task_tokens and not self._warned_task_trunc:
+                    self._warned_task_trunc = True
+                    print(
+                        f"[vla-adapter] WARNING: {int(img_idx.numel())} task tokens "
+                        f"(vision + depth) exceed num_task_tokens={num_task_tokens}; "
+                        "the excess is silently dropped. Raise act_head.num_task_tokens.",
+                        flush=True,
+                    )
                 n_img = min(int(img_idx.numel()), num_task_tokens)
                 if n_img > 0:
                     packed[row, layer_idx, :n_img] = hs[row, img_idx[:n_img]]
@@ -292,22 +303,26 @@ class RoboLFM25VL(RoboVLMBackbone):
         if not return_image_tokens:
             return fused
 
-        # Pack variable-length per-image features into a padded batch for the QFormer.
+        # Pack variable-length per-row image features into a padded batch for the QFormer.
+        # A row may carry several images (agentview + wrist), so group by each row's
+        # image-token count instead of assuming one image per row. ``image_features`` is
+        # concatenated in the same row-major order that ``masked_scatter`` consumed.
         bs = input_embeds.shape[0]
-        if len(per_image) != bs:
-            # Multiple images per sample is unsupported for depth fusion currently.
+        tokens_per_row = (input_ids == self.image_token_id).sum(dim=1).tolist()
+        if sum(tokens_per_row) != image_features.shape[0]:
             raise ValueError(
-                f"Depth QFormer expects one image feature tensor per batch row "
-                f"(got {len(per_image)} feature groups for batch {bs})."
+                f"Per-row image-token counts sum to {sum(tokens_per_row)} but got "
+                f"{image_features.shape[0]} image features."
             )
-        max_n = max(t.shape[0] for t in per_image)
-        dim = per_image[0].shape[-1]
+        max_n = max(max(tokens_per_row), 1)
+        dim = image_features.shape[-1]
         packed = image_features.new_zeros(bs, max_n, dim)
         packed_mask = torch.zeros(bs, max_n, dtype=torch.bool, device=image_features.device)
-        for i, feat in enumerate(per_image):
+        for i, feat in enumerate(image_features.split(tokens_per_row, dim=0)):
             n = feat.shape[0]
-            packed[i, :n] = feat
-            packed_mask[i, :n] = True
+            if n:
+                packed[i, :n] = feat
+                packed_mask[i, :n] = True
         return fused, packed, packed_mask
 
     def _resolve_depth_maps(
@@ -460,12 +475,18 @@ class RoboLFM25VL(RoboVLMBackbone):
                     multimodal_embeds, multimodal_attention_mask, depth_tokens
                 )
             )
+            # Count depth QFormer tokens as task tokens so Bridge Attention reads them
+            # directly (they sit after the image tokens, so ordering stays vision→depth).
+            # ``num_task_tokens`` must leave room for both; only the adapter path reads
+            # this mask, so other heads are unaffected.
             n_depth_cond = depth_tokens.shape[1]
             image_token_mask = torch.cat(
                 [
                     image_token_mask,
-                    image_token_mask.new_zeros(
-                        image_token_mask.shape[0], n_depth_cond, dtype=torch.bool
+                    image_token_mask.new_full(
+                        (image_token_mask.shape[0], n_depth_cond),
+                        self.is_vla_adapter,
+                        dtype=torch.bool,
                     ),
                 ],
                 dim=1,

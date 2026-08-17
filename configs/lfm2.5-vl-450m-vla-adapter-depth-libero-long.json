@@ -76,7 +76,7 @@
         "down_sample": "none",
         "num_action_tokens": 64,
         "latent": 1,
-        "num_task_tokens": 512,
+        "num_task_tokens": 1024,
         "use_pro_version": true,
         "proprio_dim": 9,
         "num_heads": 8,
