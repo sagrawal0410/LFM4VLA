@@ -31,6 +31,23 @@ from torch.utils.data import IterableDataset
 
 from data.data_utils import normalize_action
 
+
+def _host_rss_gib() -> Optional[float]:
+    """This process's resident set size in GiB (Linux only; ``None`` elsewhere)."""
+    try:
+        with open("/proc/self/status", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / (1024**2)
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _rss_suffix() -> str:
+    rss = _host_rss_gib()
+    return f" | host RSS {rss:.1f} GiB" if rss is not None else ""
+
 # Minimal vendored slice of OpenVLA's `prismatic` package (OXE/RLDS pipeline only),
 # made importable without pip-installing the full OpenVLA repo. See data/rlds/.
 _RLDS_ROOT = Path(__file__).resolve().parent / "rlds"
@@ -124,13 +141,24 @@ class LiberoRLDSDataset(IterableDataset):
         self.dataset, self.dataset_length, self.dataset_statistics = self._build_rlds(
             cache_offset=0
         )
-        if self._cache_shuffle_buffer and self.train and self._cache_refresh_every_n_samples:
-            print(
-                f"[libero-cache] rotating cache: N={self._shuffle_buffer_size} frames, "
-                f"refresh every {self.cache_refresh_every_n_steps} steps "
-                f"({self._cache_refresh_every_n_samples} samples, bs={self.batch_size})",
-                flush=True,
+        # Always log the cache state: an OOM report is unreadable without knowing
+        # whether the leak mitigation was actually active for this run.
+        split = "train" if self.train else "val"
+        if self._cache_shuffle_buffer:
+            if self._cache_refresh_every_n_samples:
+                mode = (
+                    f"rotating pinned window N={self._shuffle_buffer_size} frames, "
+                    f"refresh every {self.cache_refresh_every_n_steps} steps "
+                    f"({self._cache_refresh_every_n_samples} samples, bs={self.batch_size})"
+                )
+            else:
+                mode = f"single pinned window N={self._shuffle_buffer_size} frames (no refresh)"
+        else:
+            mode = (
+                f"NOT CACHED: uncached shuffle({self._shuffle_buffer_size}) on a repeating "
+                "stream leaks host RAM. Set cache_shuffle_buffer=true in the dataset config."
             )
+        print(f"[libero-cache] {split}: {mode}{_rss_suffix()}", flush=True)
 
     def _build_rlds(self, cache_offset: int = 0):
         from prismatic.vla.datasets.rlds import make_interleaved_dataset
@@ -223,7 +251,7 @@ class LiberoRLDSDataset(IterableDataset):
         offset = self._cache_window_idx * self._shuffle_buffer_size
         print(
             f"[libero-cache] cache refresh #{self._cache_window_idx}: "
-            f"skip={offset} take={self._shuffle_buffer_size}",
+            f"skip={offset} take={self._shuffle_buffer_size}{_rss_suffix()}",
             flush=True,
         )
         old = getattr(self, "dataset", None)
@@ -232,6 +260,12 @@ class LiberoRLDSDataset(IterableDataset):
         gc.collect()
         self.dataset, self.dataset_length, self.dataset_statistics = self._build_rlds(
             cache_offset=offset
+        )
+        # RSS here should be flat across refreshes. Steady growth means the TF
+        # pipeline rebuild itself is leaking, not the shuffle buffer.
+        print(
+            f"[libero-cache] refresh #{self._cache_window_idx} done{_rss_suffix()}",
+            flush=True,
         )
 
     def __len__(self) -> int:
