@@ -5,6 +5,7 @@
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-gpu=12
 #SBATCH --mem=96G
+#SBATCH --time=48:00:00
 #SBATCH --output=output_lfm_vla_adapter_libero_%j.out
 #SBATCH --error=output_lfm_vla_adapter_libero_%j.err
 
