@@ -105,11 +105,17 @@ def experiment(variant):
         print(f"log_dir: {log_dir}")
         print(f"ckpt_dir: {ckpt_dir}")
 
+    # trainer_class: config-selectable Lightning module (default unchanged)
+    trainer_cls = BaseTrainer
+    if variant.get("trainer_class") == "RobotNavTrainer":
+        from train.robotnav_trainer import RobotNavTrainer
+        trainer_cls = RobotNavTrainer
+
     ckpt_path = variant.get("resume") or variant.get("model_load_path")
     if ckpt_path:
-        trainer_module = BaseTrainer.from_checkpoint(ckpt_path, variant.get("model_load_source", "torch"), variant)
+        trainer_module = trainer_cls.from_checkpoint(ckpt_path, variant.get("model_load_source", "torch"), variant)
     else:
-        trainer_module = BaseTrainer(variant)
+        trainer_module = trainer_cls(variant)
 
     train_dataset = build_dataset(variant["train_dataset"], variant, trainer_module.model)
     train_loader = _build_loader(train_dataset, variant, train=True)

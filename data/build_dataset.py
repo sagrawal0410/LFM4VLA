@@ -72,6 +72,16 @@ def build_dataset(dataset_cfg: Dict[str, Any], variant: Dict[str, Any], policy_m
             **cfg,
         )
 
+    if dataset_type == "RobotNavMixtureDataset":
+        from data.robotnav_dataset import RobotNavMixtureDataset
+        cfg.setdefault("batch_size", int(variant.get("batch_size", 16)))
+        return RobotNavMixtureDataset(
+            release_dir=_resolve_path(cfg.pop("release_dir"), variant),
+            generated_root=_resolve_path(cfg.pop("generated_root"), variant),
+            **common,
+            **cfg,
+        )
+
     raise ValueError(f"Unsupported dataset type: {dataset_type}")
 
 
