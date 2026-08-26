@@ -88,6 +88,8 @@ class RobotNavMixtureDataset(IterableDataset):
         window_size: int = 9,
         fwd_pred_next_n: int = K_WAYPOINTS,
         mixture_trajectory: float = 0.85,
+        mixture_mode: str = "batch",
+        obs_randomization: Optional[Dict[str, Any]] = None,
         family_weights: Optional[Dict[str, float]] = None,
         batch_size: int = 16,
         max_samples: int = 0,
@@ -104,9 +106,56 @@ class RobotNavMixtureDataset(IterableDataset):
         self.image_fn = image_fn
         self.ws = int(window_size)
         self.mix_traj = float(mixture_trajectory)
+        # "batch": paper-style batch-level sampling (each batch homogeneous —
+        # one trajectory family or VL). "sample": per-sample Bernoulli mixing,
+        # so a single batch blends ~85% trajectory and ~15% VL samples.
+        self.mixture_mode = str(mixture_mode)
+        assert self.mixture_mode in ("batch", "sample")
+        # Qwen-RobotNav per-sample observation randomization, single-view
+        # variant (camera-view + per-camera-weight axes intentionally absent).
+        # Axes: total visual token budget B ~ U[budget_min, budget_max];
+        # temporal decay gamma ~ U[gamma_min, gamma_max] (older frames get
+        # geometrically fewer tokens); history-selection mode 50/50
+        # random-global vs latest-window. Budgets are realized by resolution
+        # scaling (tokens ~ pixels for the LFM processor; frames are never
+        # upscaled past native, so the current frame stays sharpest).
+        self.obs_rand = None
+        if obs_randomization and obs_randomization.get("enabled", True):
+            self.obs_rand = {
+                "budget_min": float(obs_randomization.get("budget_min", 2048)),
+                "budget_max": float(obs_randomization.get("budget_max", 4096)),
+                "gamma_min": float(obs_randomization.get("gamma_min", 1.0)),
+                "gamma_max": float(obs_randomization.get("gamma_max", 3.0)),
+                "frame_tokens_min": float(obs_randomization.get("frame_tokens_min", 64)),
+                "frame_tokens_max": float(obs_randomization.get("frame_tokens_max", 256)),
+                "native_tokens": float(obs_randomization.get("native_tokens", 256)),
+                "p_latest": float(obs_randomization.get("p_latest", 0.5)),
+            }
         self.batch_size = int(batch_size)
         self.max_samples = int(max_samples)
-        self.rng = random.Random(seed)
+        # Stream position is not checkpointed: without a salt, every resumed
+        # attempt would replay the identical sample sequence from the seed.
+        # Mixing the Slurm job id + restart count gives each attempt a fresh
+        # draw order (set data_seed_salt: "none" for strict reproducibility
+        # of uninterrupted runs).
+        salt = 0
+        rank_salt = 0
+        if str(_ignored.get("data_seed_salt", "auto")) == "auto":
+            import os
+            # Distributed: each rank MUST draw a distinct stream, else N-rank
+            # data parallelism silently trains N copies of the same batches.
+            rank = int(os.environ.get("SLURM_PROCID",
+                                      os.environ.get("RANK", "0")) or 0)
+            rank_salt = rank * 7919
+            salt = (int(os.environ.get("SLURM_JOB_ID", "0") or 0) * 1009
+                    + int(os.environ.get("SLURM_RESTART_COUNT", "0") or 0)
+                    + rank_salt)
+        self.rng = random.Random(seed + salt)
+        # Batch-mode multi-rank safety: the traj-vs-VL TYPE decision must be
+        # identical on every rank at every step (FSDP/DDP collectives hang if
+        # ranks run different module branches), so it draws from a stream
+        # salted with job+restart only. Content draws stay rank-salted.
+        self.type_rng = random.Random(seed + salt - rank_salt)
         self.data_source = "robotnav_traj"
 
         weights = family_weights or {
@@ -171,24 +220,61 @@ class RobotNavMixtureDataset(IterableDataset):
             self._instr_cache[eid] = instr
         return self._instr_cache[eid]
 
+    def _randomized_frames(self, ep_dir, hist: List[int], t: int):
+        """Single-view per-sample observation randomization (see __init__)."""
+        r = self.obs_rand
+        B = self.rng.uniform(r["budget_min"], r["budget_max"])
+        gamma = self.rng.uniform(r["gamma_min"], r["gamma_max"])
+        past = [int(i) for i in hist[:-1]] if len(hist) > 1 else []
+        n_hist = min(self.ws - 1, len(past))
+        if n_hist > 0:
+            if self.rng.random() < r["p_latest"]:            # recency window
+                sel = past[-n_hist:]
+            else:                                            # random / global
+                sel = sorted(self.rng.sample(past, n_hist))
+        else:
+            sel = []
+        frame_ids = sel + [t]
+        while len(frame_ids) < self.ws:
+            frame_ids.insert(0, frame_ids[0])
+        # per-frame token budgets: current frame age 0, decaying into the past
+        ages = list(range(len(frame_ids) - 1, -1, -1))
+        wts = [gamma ** (-a) for a in ages]
+        s = sum(wts)
+        budgets = [min(r["frame_tokens_max"],
+                       max(r["frame_tokens_min"], B * w / s)) for w in wts]
+        frames = []
+        for fi, b in zip(frame_ids, budgets):
+            im = Image.open(ep_dir / f"{fi:03d}_front.jpg").convert("RGB")
+            scale = min(1.0, (b / r["native_tokens"]) ** 0.5)  # tokens ~ pixels
+            if scale < 0.995:
+                im = im.resize((max(64, int(im.width * scale)) // 2 * 2,
+                                max(64, int(im.height * scale)) // 2 * 2),
+                               Image.BILINEAR)
+            frames.append(torch.from_numpy(np.array(im)).permute(2, 0, 1).contiguous())
+        return frames                                        # list of [C, H, W]
+
     def _traj_sample(self, family: str, row: Dict[str, Any]) -> Dict[str, Any]:
         eid = row["episode_id"]
         ep_dir = self._episode_dir(family, eid)
         t = int(row["t"])
         hist = row.get("available_history") or list(range(t + 1))
-        n_hist = min(self.ws - 1, len(hist) - 1) if len(hist) > 1 else 0
-        if n_hist > 0:
-            idxs = sorted({int(i) for i in np.linspace(hist[0], hist[-2], n_hist)})
+        if self.obs_rand is not None:
+            rgb = self._randomized_frames(ep_dir, hist, t)   # list of [C,H,W]
         else:
-            idxs = []
-        frame_ids = idxs + [t]
-        while len(frame_ids) < self.ws:          # left-pad by repeating earliest
-            frame_ids.insert(0, frame_ids[0])
-        pils = [Image.open(ep_dir / f"{fi:03d}_front.jpg").convert("RGB")
-                for fi in frame_ids]
-        rgb = self.image_fn(pils)
-        if not torch.is_tensor(rgb):
-            rgb = torch.stack(rgb)
+            n_hist = min(self.ws - 1, len(hist) - 1) if len(hist) > 1 else 0
+            if n_hist > 0:
+                idxs = sorted({int(i) for i in np.linspace(hist[0], hist[-2], n_hist)})
+            else:
+                idxs = []
+            frame_ids = idxs + [t]
+            while len(frame_ids) < self.ws:      # left-pad by repeating earliest
+                frame_ids.insert(0, frame_ids[0])
+            pils = [Image.open(ep_dir / f"{fi:03d}_front.jpg").convert("RGB")
+                    for fi in frame_ids]
+            rgb = self.image_fn(pils)
+            if not torch.is_tensor(rgb):
+                rgb = torch.stack(rgb)
         sf = self.scale[family]
         w = np.asarray(row["future_waypoints_robot"], dtype=np.float32)
         w[:, 0] = np.clip(w[:, 0] / max(sf["x"], 1e-6), -1, 1)
@@ -214,10 +300,43 @@ class RobotNavMixtureDataset(IterableDataset):
                 "category": row.get("category", "vl")}
 
     # ------------------------------------------------------------- iterate --
+    def _one_traj_sample(self) -> Dict[str, Any]:
+        fam = self.rng.choices(self.family_names, weights=self.family_w)[0]
+        stream = self.families[fam]
+        for _attempt in range(5):
+            row = stream.next()
+            try:
+                return self._traj_sample(fam, row)
+            except FileNotFoundError:
+                continue
+        return self._traj_sample(fam, stream.next())
+
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         yielded = 0
+        if self.mixture_mode == "sample":
+            # Per-sample Bernoulli mixing: each batch blends trajectory + VL.
+            # Emitted in batch_size blocks with >=1 trajectory sample forced
+            # per block: multi-rank strategies (FSDP reduce-scatter, sync_dist
+            # logging) hang if ranks disagree on which modules ran, and an
+            # all-VL block would skip the action head entirely. Distortion is
+            # negligible (traj is the 85% majority). The all-traj case is
+            # handled trainer-side with a zero-weighted dummy VL forward.
+            while True:
+                block = []
+                for _ in range(self.batch_size):
+                    if self.vl_stream is not None and self.rng.random() >= self.mix_traj:
+                        block.append(self._vl_sample())
+                    else:
+                        block.append(self._one_traj_sample())
+                if all(s["sample_type"] == "vl" for s in block):
+                    block[self.rng.randrange(len(block))] = self._one_traj_sample()
+                for s in block:
+                    yield s
+                    yielded += 1
+                    if self.max_samples and yielded >= self.max_samples:
+                        return
         while True:
-            if self.vl_stream is not None and self.rng.random() >= self.mix_traj:
+            if self.vl_stream is not None and self.type_rng.random() >= self.mix_traj:
                 for _ in range(self.batch_size):          # homogeneous VL batch
                     yield self._vl_sample()
                     yielded += 1
@@ -239,16 +358,34 @@ class RobotNavMixtureDataset(IterableDataset):
 
     # -------------------------------------------------------------- collate --
     def collater(self, samples: List[Dict[str, Any]]) -> Dict[str, Any]:
-        if samples[0]["sample_type"] == "vl":
+        if self.mixture_mode == "sample":
+            traj = [s for s in samples if s["sample_type"] != "vl"]
+            vl = [s for s in samples if s["sample_type"] == "vl"]
             return {
-                "data_source": "robotnav_vl",
-                "vl_images": [s["images"] for s in samples],
-                "vl_user": [s["user_text"] for s in samples],
-                "vl_answer": [s["answer_text"] for s in samples],
-                "raw_text": [s["user_text"] for s in samples],
+                "data_source": "robotnav_mixed",
+                "traj": self._collate_traj(traj) if traj else None,
+                "vl": self._collate_vl(vl) if vl else None,
             }
-        rgb = torch.stack([s["rgb"] for s in samples])            # [B, ws, C, H, W]
-        b = rgb.shape[0]
+        if samples[0]["sample_type"] == "vl":
+            return self._collate_vl(samples)
+        return self._collate_traj(samples)
+
+    def _collate_vl(self, samples: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {
+            "data_source": "robotnav_vl",
+            "vl_images": [s["images"] for s in samples],
+            "vl_user": [s["user_text"] for s in samples],
+            "vl_answer": [s["answer_text"] for s in samples],
+            "raw_text": [s["user_text"] for s in samples],
+        }
+
+    def _collate_traj(self, samples: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # Frames keep their native per-episode resolutions (640 x U[320,480]),
+        # so rgb is a LIST of [ws, C, H, W] tensors — never stacked. The
+        # trainer converts frames to PIL individually and the LFM processor
+        # handles arbitrary sizes; vision_x is only used for (bs, ws) shape.
+        rgb = [s["rgb"] for s in samples]
+        b = len(rgb)
         chunks = torch.stack([s["chunk"] for s in samples])       # [B, K, 3]
         masks = torch.stack([s["chunk_mask"] for s in samples])   # [B, K]
         action_chunck = torch.zeros(b, self.ws, K_WAYPOINTS, ACTION_DIM)
@@ -256,8 +393,16 @@ class RobotNavMixtureDataset(IterableDataset):
         action_chunck[:, -1] = chunks
         chunck_mask[:, -1] = masks
         texts = [s["lang"] for s in samples]
+        # Per-sample denormalization vectors (frozen 99th-pct scale factors) so
+        # the trainer can compute task-space metrics (ADE/FDE meters, yaw deg).
+        wp_scale = torch.tensor(
+            [[self.scale[s["family"]]["x"], self.scale[s["family"]]["y"],
+              self.scale[s["family"]]["yaw"]] for s in samples],
+            dtype=torch.float32)
         return {
             "rgb": rgb,
+            "family": [s["family"] for s in samples],
+            "wp_scale": wp_scale,
             "hand_rgb": None,
             "action": torch.zeros(b, self.ws, ACTION_DIM),
             "text": texts,

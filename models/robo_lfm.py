@@ -90,11 +90,17 @@ class RoboLFM25VL(RoboVLMBackbone):
 
     @property
     def image_processor(self):
-        """Convert PIL images to float CHW tensors at native resolution (no resize/normalize)."""
+        """Convert PIL images to uint8 CHW tensors at native resolution.
+
+        Kept uint8 on purpose (the documented dataloader contract): the trainer
+        converts frames back to PIL before the LFM processor, so a float cast
+        here only quadruples host-RAM churn — which, with variable native
+        resolutions, fragments the allocator over long runs.
+        """
 
         def _pil_to_chw(img: Image.Image) -> torch.Tensor:
             img = img.convert("RGB")
-            return torch.from_numpy(np.array(img, copy=False)).permute(2, 0, 1).float()
+            return torch.from_numpy(np.array(img)).permute(2, 0, 1).contiguous()
 
         return _pil_to_chw
 
@@ -224,6 +230,24 @@ class RoboLFM25VL(RoboVLMBackbone):
                 ]
 
         return packed.view(bs, seq_len, n_layers, num_task_tokens + n_aq, dim)
+
+    def _final_text_norm(self):
+        """Final norm module of the text tower (for pre-norm feature capture)."""
+        import torch.nn as nn
+
+        tower = self.text_tower
+        for name in ("norm", "final_layernorm", "embedding_norm", "ln_f", "final_norm"):
+            mod = getattr(tower, name, None)
+            if isinstance(mod, nn.Module):
+                return mod
+        if not getattr(self, "_warned_no_final_norm", False):
+            self._warned_no_final_norm = True
+            print(
+                "[robotnav] WARNING: could not locate the text tower's final norm; "
+                "use_pre_norm_features falls back to hidden_states[-1].",
+                flush=True,
+            )
+        return None
 
     def encode_images(self, images, image_sizes=None):
         raise NotImplementedError(
@@ -394,7 +418,12 @@ class RoboLFM25VL(RoboVLMBackbone):
     ):
         loss: Dict[str, Any] = {}
         assert vision_x is not None
-        bs, seq_len = vision_x.shape[:2]
+        if isinstance(vision_x, (list, tuple)):
+            # RobotNav: list of per-sample [ws, C, H, W] tensors at native,
+            # per-episode resolutions (pixels flow via lang_x processor dict).
+            bs, seq_len = len(vision_x), len(vision_x[0])
+        else:
+            bs, seq_len = vision_x.shape[:2]
 
         action_space = self.act_head_configs.get("action_space", "continuous")
         history_type = self.act_head_configs.get("history_type", "post")
@@ -589,6 +618,20 @@ class RoboLFM25VL(RoboVLMBackbone):
             if multimodal_embeds.dtype != model_dtype:
                 multimodal_embeds = multimodal_embeds.to(dtype=model_dtype)
 
+        # Optionally capture the final-layer features BEFORE the backbone's
+        # final norm (GR00T-style heads set act_head.use_pre_norm_features).
+        _pre_norm_capture: Dict[str, torch.Tensor] = {}
+        _pre_norm_hook = None
+        if (
+            self.act_head_configs is not None
+            and self.act_head_configs.get("use_pre_norm_features", False)
+        ):
+            _norm_mod = self._final_text_norm()
+            if _norm_mod is not None:
+                _pre_norm_hook = _norm_mod.register_forward_pre_hook(
+                    lambda mod, args: _pre_norm_capture.__setitem__("hs", args[0])
+                )
+
         output = self.model(
             input_ids=None,
             attention_mask=multimodal_attention_mask,
@@ -598,6 +641,9 @@ class RoboLFM25VL(RoboVLMBackbone):
             use_cache=False,
             output_hidden_states=True,
         )
+
+        if _pre_norm_hook is not None:
+            _pre_norm_hook.remove()
 
         depth_hs = None
         head_kwargs: Dict[str, Any] = {}
@@ -620,7 +666,7 @@ class RoboLFM25VL(RoboVLMBackbone):
             head_kwargs["proprio"] = rel_state
             head_kwargs["phase"] = "Training" if mode in ("train", "val") else "Inference"
         else:
-            output_hs = output.hidden_states[-1].clone()
+            output_hs = _pre_norm_capture.get("hs", output.hidden_states[-1]).clone()
             if history_type == "pre":
                 output_hs = rearrange(output_hs, "b (l n) d -> (b l) n d", l=seq_len)
 
@@ -637,6 +683,11 @@ class RoboLFM25VL(RoboVLMBackbone):
                 if token_src != "all":
                     raise ValueError(f"Unsupported token source {token_src}")
                 action_hs = output_hs.reshape(bs, seq_len, *output_hs.shape[1:])
+                # Full-sequence heads need to ignore padding when attending
+                # over VLM features (RobotNav FM heads).
+                head_kwargs["encoder_attention_mask"] = multimodal_attention_mask
+                if self.act_head_configs.get("type") == "SmolVLAFlowMatchingHead":
+                    head_kwargs["per_layer_hs"] = output.hidden_states
             else:
                 raise ValueError(f"Unsupported action space {action_space}")
 

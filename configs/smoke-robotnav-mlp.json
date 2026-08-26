@@ -1,7 +1,7 @@
 {
   "robovlm_name": "RoboLFM2.5",
   "parent": null,
-  "task_name": "lfm450m_robotnav_waypointfc_8515",
+  "task_name": "lfm450m_robotnav_mlp_8515_smoke20",
   "model": "lfm450m",
   "model_url": "https://huggingface.co/LiquidAI/LFM2.5-VL-450M",
   "seq_len": 1,
@@ -51,7 +51,7 @@
     "train_text_embedding": true
   },
   "act_head": {
-    "type": "WaypointFCDecoder",
+    "type": "RobotNavMLPHead",
     "hidden_size": 1024,
     "action_dim": 3,
     "down_sample": "none",
@@ -80,16 +80,16 @@
     "strategy": "auto",
     "precision": "bf16-mixed",
     "logger": [
-      "wandb"
+      "csv"
     ],
     "gradient_clip_val": 1.0,
     "use_distributed_sampler": false,
     "log_every_n_steps": 10,
-    "max_epochs": 100,
+    "max_epochs": 1,
     "check_val_every_n_epoch": 1,
-    "val_check_interval": 5000,
+    "val_check_interval": null,
     "checkpoint_every_n_train_steps": 1000,
-    "max_steps": 120000,
+    "max_steps": 20,
     "accumulate_grad_batches": 4
   },
   "train_dataset": {

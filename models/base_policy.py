@@ -112,6 +112,32 @@ class BasePolicyHead(torch.nn.Module):
         if labels is None or labels[0] is None:
             return {"loss": None}
 
+        if labels[1] is None:
+            # Gripper-less action space (e.g., RobotNav x, y, yaw): regress the
+            # arm output against the full label tensor. Any unused gripper head
+            # still gets a zero-grad touch so DDP does not see unused params.
+            aux = 0.0
+            if isinstance(pred_action, (tuple, list)):
+                if len(pred_action) > 1 and torch.is_tensor(pred_action[1]):
+                    aux = pred_action[1].sum() * 0.0
+                pred = pred_action[0]
+            else:
+                pred = pred_action
+            if pred.shape[-1] != labels[0].shape[-1]:
+                raise ValueError(
+                    f"gripper-less labels have dim {labels[0].shape[-1]} but arm "
+                    f"pred has dim {pred.shape[-1]}; for FCDecoder set "
+                    "act_head.action_dim = label_dim + 1 (tanh arm covers all dims)."
+                )
+            if attention_mask is None:
+                pose_loss = torch.nn.functional.huber_loss(pred, labels[0])
+            else:
+                per = torch.nn.functional.huber_loss(
+                    pred, labels[0], reduction="none").mean(-1)
+                m = attention_mask.bool()
+                pose_loss = per[m].mean() if m.any() else per.sum() * 0.0
+            return {"loss_arm": pose_loss + aux}
+
         if isinstance(pred_action, tuple) or isinstance(pred_action, list):
             if pred_action[0].ndim == pred_action[1].ndim:
                 pred_action = torch.cat(pred_action, dim=-1)

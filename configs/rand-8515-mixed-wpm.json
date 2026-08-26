@@ -1,7 +1,7 @@
 {
   "robovlm_name": "RoboLFM2.5",
   "parent": null,
-  "task_name": "lfm450m_robotnav_waypointfc_8515",
+  "task_name": "lfm450m_robotnav_waypointfc_8515_rand_mixedbatch",
   "model": "lfm450m",
   "model_url": "https://huggingface.co/LiquidAI/LFM2.5-VL-450M",
   "seq_len": 1,
@@ -11,15 +11,15 @@
   "cap_loss_ratio": 0.05,
   "fwd_loss_ratio": 0,
   "seed": 123,
-  "batch_size": 8,
+  "batch_size": 32,
   "num_workers": 0,
   "data_scale": 1,
   "optimizer": "adam",
   "learning_rate": 2e-05,
   "min_lr_scale": 0.01,
   "weight_decay": 0.01,
-  "warmup_epochs": 0.25,
-  "warmup_steps": 0,
+  "warmup_epochs": 0,
+  "warmup_steps": 3600,
   "use_hand_rgb": false,
   "use_time_causal_attn": false,
   "use_mim_obs_loss": false,
@@ -31,7 +31,7 @@
   "output_root": "/home/teams/research/robotics/checkpoints",
   "log_root": "/home/teams/research/robotics/logs",
   "cache_root": "/home/teams/research/robotics/cache",
-  "wandb_project": "lfm4vla",
+  "wandb_project": "lfm4vla_rand",
   "model_load_path": null,
   "model_load_source": "torch",
   "resume": null,
@@ -90,7 +90,7 @@
     "val_check_interval": 5000,
     "checkpoint_every_n_train_steps": 1000,
     "max_steps": 120000,
-    "accumulate_grad_batches": 4
+    "accumulate_grad_batches": 1
   },
   "train_dataset": {
     "type": "RobotNavMixtureDataset",
@@ -105,7 +105,19 @@
       "pointnav_hm3d": 0.492,
       "pointnav_mp3d": 0.492
     },
-    "seed": 20260617
+    "seed": 20260617,
+    "mixture_mode": "sample",
+    "obs_randomization": {
+      "enabled": true,
+      "budget_min": 2048,
+      "budget_max": 4096,
+      "gamma_min": 1.0,
+      "gamma_max": 3.0,
+      "frame_tokens_min": 64,
+      "frame_tokens_max": 256,
+      "native_tokens": 256,
+      "p_latest": 0.5
+    }
   },
   "val_dataset": {
     "type": "RobotNavMixtureDataset",
@@ -121,11 +133,27 @@
       "pointnav_mp3d": 0.492
     },
     "seed": 777,
-    "max_samples": 512
+    "max_samples": 512,
+    "mixture_mode": "sample",
+    "obs_randomization": {
+      "enabled": true,
+      "budget_min": 2048,
+      "budget_max": 4096,
+      "gamma_min": 1.0,
+      "gamma_max": 3.0,
+      "frame_tokens_min": 64,
+      "frame_tokens_max": 256,
+      "native_tokens": 256,
+      "p_latest": 0.5
+    }
   },
   "norm_action": false,
   "norm_min": -1,
   "norm_max": 1,
   "trainer_class": "RobotNavTrainer",
-  "vl_cotrain_ratio": 1.0
+  "vl_cotrain_ratio": 1.0,
+  "head_learning_rate": 0.0001,
+  "scheduler": "cosine",
+  "val_waypoint_metrics": true,
+  "val_minade_k": 1
 }

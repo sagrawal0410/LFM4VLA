@@ -1,17 +1,17 @@
 {
   "robovlm_name": "RoboLFM2.5",
   "parent": null,
-  "task_name": "lfm450m_robotnav_waypointfc_8515",
+  "task_name": "lfm450m_robotnav_vla_adapter_8515",
   "model": "lfm450m",
   "model_url": "https://huggingface.co/LiquidAI/LFM2.5-VL-450M",
   "seq_len": 1,
   "window_size": 9,
   "fwd_pred_next_n": 8,
-  "arm_gripper_loss_ratio": 0.01,
+  "arm_gripper_loss_ratio": 1.0,
   "cap_loss_ratio": 0.05,
   "fwd_loss_ratio": 0,
   "seed": 123,
-  "batch_size": 8,
+  "batch_size": 2,
   "num_workers": 0,
   "data_scale": 1,
   "optimizer": "adam",
@@ -51,13 +51,16 @@
     "train_text_embedding": true
   },
   "act_head": {
-    "type": "WaypointFCDecoder",
+    "type": "VLAAdapterL1Head",
     "hidden_size": 1024,
     "action_dim": 3,
     "down_sample": "none",
+    "num_action_tokens": 64,
     "latent": 1,
-    "fwd_pred_next_n": 8,
-    "window_size": 9,
+    "num_task_tokens": 512,
+    "use_pro_version": true,
+    "proprio_dim": 8,
+    "num_heads": 8,
     "action_space": "continuous",
     "with_history": true,
     "history_type": "post"
@@ -90,7 +93,7 @@
     "val_check_interval": 5000,
     "checkpoint_every_n_train_steps": 1000,
     "max_steps": 120000,
-    "accumulate_grad_batches": 4
+    "accumulate_grad_batches": 16
   },
   "train_dataset": {
     "type": "RobotNavMixtureDataset",

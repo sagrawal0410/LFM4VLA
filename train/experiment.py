@@ -19,6 +19,25 @@ def _build_strategy(strategy_name):
         from lightning.pytorch.strategies import DeepSpeedStrategy
 
         return DeepSpeedStrategy(stage=2)
+    if strategy_name == "fsdp":
+        # Minimal multi-node FSDP: size-based wrapping (model-agnostic),
+        # use_orig_params so permanently-unused params (e.g. the ActionQuery
+        # token in down_sample configs) are tolerated, and FULL state dicts so
+        # checkpoints stay drop-in compatible with the resume/lineage/sanitizer
+        # machinery. Pair with mixed-batch configs: every optimizer step must
+        # touch every wrapped unit (sep-batch VL steps leave the action head
+        # unused, which FSDP does not forgive).
+        import functools
+
+        from lightning.pytorch.strategies import FSDPStrategy
+        from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+
+        return FSDPStrategy(
+            auto_wrap_policy=functools.partial(
+                size_based_auto_wrap_policy, min_num_params=int(5e7)),
+            use_orig_params=True,
+            state_dict_type="full",
+        )
     return strategy_name
 
 
@@ -158,6 +177,23 @@ def experiment(variant):
     )
     if "limit_val_batches" in trainer_cfg:
         trainer_kwargs["limit_val_batches"] = trainer_cfg["limit_val_batches"]
+    if trainer_cfg.get("strategy") == "fsdp":
+        # FSDP flat-params require uniform dtype; the backbone loads in bf16
+        # while heads are built fp32. Cast everything to fp32 (bf16-mixed
+        # autocast still does compute in bf16, matching the other runs).
+        trainer_module.float()
+        # Tied lm_head/embedding share one tensor; FSDP(use_orig_params)
+        # registers the alias flattened, making checkpoint save/load shapes
+        # asymmetric (save [V, D], load expects [V*D]). Untie by cloning —
+        # release checkpoints already store both keys separately.
+        bb = getattr(trainer_module.model, "backbone", None)
+        emb = bb.get_input_embeddings() if hasattr(bb, "get_input_embeddings") else None
+        head = getattr(bb, "lm_head", None)
+        if emb is not None and head is not None and \
+                getattr(head, "weight", None) is getattr(emb, "weight", None):
+            import torch as _torch
+            head.weight = _torch.nn.Parameter(emb.weight.detach().clone())
+            print("[fsdp] untied lm_head from input embeddings", flush=True)
     trainer = pl.Trainer(**trainer_kwargs)
 
     trainer.fit(trainer_module, train_loader, val_loader, ckpt_path=variant.get("resume"))

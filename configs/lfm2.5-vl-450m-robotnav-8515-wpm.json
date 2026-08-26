@@ -127,5 +127,7 @@
   "norm_min": -1,
   "norm_max": 1,
   "trainer_class": "RobotNavTrainer",
-  "vl_cotrain_ratio": 1.0
+  "vl_cotrain_ratio": 1.0,
+  "val_waypoint_metrics": true,
+  "val_minade_k": 1
 }

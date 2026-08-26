@@ -97,7 +97,9 @@ class RoboVLMBackbone(nn.Module):
 
         if self.act_head_configs is not None:
             self.action_space = self.act_head_configs.get("action_space", "continuous")
-        assert self.action_space == "continuous"
+        # "continuous" appends learned ActionQuery tokens; "down_sample" hands the
+        # full sequence to the head (RobotNav flow-matching heads).
+        assert self.action_space in ("continuous", "down_sample")
 
         # Default LIBERO/CALVIN: one learned embedding [D], repeated ``latent`` times.
         # HE / FCContinuousDecoder may opt into multi-token layout via
@@ -363,9 +365,14 @@ class RoboVLMBackbone(nn.Module):
 
         if hasattr(vla_adapter_policy, head_type):
             return getattr(vla_adapter_policy, head_type)
+        import models.robotnav_heads as robotnav_heads
+
+        if hasattr(robotnav_heads, head_type):
+            return getattr(robotnav_heads, head_type)
         raise AttributeError(
             f"Unknown act_head type '{head_type}'. "
-            "Expected a class in models.base_policy, continuous_policy, or vla_adapter_policy."
+            "Expected a class in models.base_policy, continuous_policy, "
+            "vla_adapter_policy, or robotnav_heads."
         )
 
     def _vlm_num_hidden_layers(self) -> int:
@@ -424,6 +431,8 @@ class RoboVLMBackbone(nn.Module):
                     "depth_map_size", int(self.act_head_configs.get("depth_map_size", 56))
                 )
                 self.depth_latent_num = int(_kwargs["depth_latent"])
+            if head_type == "SmolVLAFlowMatchingHead":
+                _kwargs.setdefault("num_vlm_layers", self._vlm_num_hidden_layers())
             if head_type == "VLAAdapterL1Head":
                 _kwargs.setdefault("num_blocks", self._vlm_num_hidden_layers())
                 _kwargs.setdefault(

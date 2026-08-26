@@ -205,6 +205,86 @@ class BaseTrainer(pl.LightningModule):
             "loss_vl_cotrain": loss_vl_cotrain,
         }
 
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        """Periodic allocator reclaim + RSS telemetry.
+
+        Variable-size native-resolution image batches leave glibc holding
+        freed-but-unreturned heap (observed as a steady RSS climb to the
+        cgroup limit). Every 200 steps: drop cycles, malloc_trim(0), and
+        print RSS so the slope is visible in the job log.
+        """
+        del outputs, batch
+        if batch_idx % 200 != 0 or batch_idx == 0:
+            return
+        try:
+            import ctypes
+            import gc
+
+            gc.collect()
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS"):
+                        print(f"[mem] step={self.global_step} {line.strip()}",
+                              flush=True)
+                        break
+        except Exception:
+            pass
+
+    def configure_gradient_clipping(self, optimizer, gradient_clip_val=None,
+                                    gradient_clip_algorithm=None):
+        # Lightning's FSDPPrecision rejects gradient_clip_algorithm='norm';
+        # under FSDP the wrapped root module clips shard-aware instead.
+        from lightning.pytorch.strategies import FSDPStrategy
+        if isinstance(self.trainer.strategy, FSDPStrategy):
+            if gradient_clip_val:
+                self.trainer.strategy.model.clip_grad_norm_(gradient_clip_val)
+            return
+        self.clip_gradients(optimizer, gradient_clip_val,
+                            gradient_clip_algorithm)
+
+    def on_load_checkpoint(self, checkpoint):
+        """Defensive resume: if the saved optimizer's param-group sizes don't
+        match this process's trainable params, drop optimizer/scheduler state
+        and warm-start them — weights, global step, loops, and the wandb run
+        all still resume. Prevents a hard crash in restore_optimizers."""
+        fresh = [len(g["params"]) for g in self.get_grouped_params(self.model)]
+        saved_states = checkpoint.get("optimizer_states") or []
+        saved = [[len(g["params"]) for g in s.get("param_groups", [])]
+                 for s in saved_states]
+        if saved and saved != [fresh]:
+            print(f"[resume] optimizer group mismatch (saved {saved} vs fresh "
+                  f"{[fresh]}); dropping optimizer moments (warm-start) but "
+                  "KEEPING scheduler state so the LR stays at the resumed "
+                  "step's value (weights + step + loops + wandb continue).",
+                  flush=True)
+            checkpoint["optimizer_states"] = []
+            # Scheduler state is param-group-shape-free (counters + base_lrs);
+            # keep it unless its group count disagrees with the live optimizer.
+            for sched in checkpoint.get("lr_schedulers", []):
+                if len(sched.get("base_lrs", [0])) != len(fresh):
+                    checkpoint["lr_schedulers"] = []
+                    print("[resume] scheduler group count unexpected; "
+                          "dropped scheduler state too.", flush=True)
+                    break
+
+    def _infer_batch_size(self, batch):
+        """Explicit batch size for self.log — Lightning cannot infer it from
+        batches without uniformly-shaped tensors (RobotNav VL batches are PIL
+        lists; traj batches carry list-of-native-res rgb)."""
+        if isinstance(batch, dict):
+            if batch.get("data_source") == "robotnav_mixed":
+                n = 0
+                for part in (batch.get("traj"), batch.get("vl")):
+                    if part:
+                        n += self._infer_batch_size(part) or 0
+                return n or None
+            for key in ("rgb", "vl_user", "text", "action_chunck"):
+                v = batch.get(key)
+                if v is not None and hasattr(v, "__len__"):
+                    return len(v)
+        return None
+
     def _log_output(self, output, phase, prog_bar_set=None, dataset=None, **kwargs):
         prog_bar_set = prog_bar_set or set()
         for key, value in output.items():
@@ -254,7 +334,9 @@ class BaseTrainer(pl.LightningModule):
 
             image_inputs = []
             texts = []
-            for i in range(rgb.shape[0]):
+            # len() == shape[0] for tensors; also supports list-of-tensor rgb
+            # (RobotNav keeps native per-episode resolutions, so no stacking).
+            for i in range(len(rgb)):
                 for j in range(seq_len):
                     image_inputs.append(self._frame_to_pil(rgb[i][j]))
                     if images_per_sample == 2:
@@ -301,7 +383,10 @@ class BaseTrainer(pl.LightningModule):
 
         rgb = batch["rgb"]
         if isinstance(rgb, list):
-            rgb = [x.to(self.device) for x in rgb]
+            # List-form rgb (native/per-frame resolutions) is only ever
+            # converted to CPU PIL for the processor — no device move needed,
+            # and elements may themselves be lists of per-frame tensors.
+            pass
         else:
             rgb = rgb.to(self.device)
             if rgb.ndim == 4:
@@ -414,6 +499,7 @@ class BaseTrainer(pl.LightningModule):
             on_step=True,
             on_epoch=True,
             sync_dist=True,
+            batch_size=self._infer_batch_size(batch),
         )
         return output["loss"]
 
@@ -439,6 +525,7 @@ class BaseTrainer(pl.LightningModule):
             on_epoch=True,
             on_step=False,
             dataset=dataset,
+            batch_size=self._infer_batch_size(batch),
         )
         return output["loss"]
 
@@ -458,7 +545,24 @@ class BaseTrainer(pl.LightningModule):
             )
 
     def get_grouped_params(self, model):
-        return [{
-            "params": [p for _, p in model.named_parameters() if p.requires_grad],
-            "weight_decay": self.configs["weight_decay"],
-        }]
+        """One param group by default; with ``head_learning_rate`` set, the
+        action pathway (act_head + ActionQuery token) gets its own group and
+        peak LR (paper: backbone 2e-5, action head ~1e-4). The LR schedule
+        scales each group's own peak multiplicatively."""
+        wd = self.configs["weight_decay"]
+        head_lr = float(self.configs.get("head_learning_rate", 0) or 0)
+        if not head_lr:
+            return [{
+                "params": [p for _, p in model.named_parameters() if p.requires_grad],
+                "weight_decay": wd,
+            }]
+        head, backbone = [], []
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            (head if ("act_head" in name or "action_token" in name)
+             else backbone).append(p)
+        return [
+            {"params": backbone, "weight_decay": wd},
+            {"params": head, "weight_decay": wd, "lr": head_lr},
+        ]
