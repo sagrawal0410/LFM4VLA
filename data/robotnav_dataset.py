@@ -64,10 +64,12 @@ class _ShardStream:
         assert shard_paths, "no shards found"
         self.paths = list(shard_paths)
         self.rng = rng
+        self._cur = ""
         self._rows: List[str] = []
 
     def _refill(self) -> None:
         path = self.rng.choice(self.paths)
+        self._cur = path
         with open(path) as f:
             self._rows = f.readlines()
         self.rng.shuffle(self._rows)
@@ -75,7 +77,9 @@ class _ShardStream:
     def next(self) -> Dict[str, Any]:
         while not self._rows:
             self._refill()
-        return json.loads(self._rows.pop())
+        row = json.loads(self._rows.pop())
+        row["_src"] = self._cur                      # shard path (family lookup)
+        return row
 
 
 class RobotNavMixtureDataset(IterableDataset):
@@ -133,6 +137,10 @@ class RobotNavMixtureDataset(IterableDataset):
             }
         self.batch_size = int(batch_size)
         self.max_samples = int(max_samples)
+        # Only FSDP needs every rank to touch both branches every step; see
+        # the note in __iter__. Off by default so the 85/15 split is exact.
+        self.force_both_kinds = bool(_ignored.get("force_both_kinds", False))
+        self._vl_carry = 0.0
         # Stream position is not checkpointed: without a salt, every resumed
         # attempt would replay the identical sample sequence from the seed.
         # Mixing the Slurm job id + restart count gives each attempt a fresh
@@ -155,7 +163,8 @@ class RobotNavMixtureDataset(IterableDataset):
         # identical on every rank at every step (FSDP/DDP collectives hang if
         # ranks run different module branches), so it draws from a stream
         # salted with job+restart only. Content draws stay rank-salted.
-        self.type_rng = random.Random(seed + salt - rank_salt)
+        self._type_seed = seed + salt - rank_salt
+        self.type_rng = random.Random(self._type_seed)
         self.data_source = "robotnav_traj"
 
         weights = family_weights or {
@@ -173,6 +182,17 @@ class RobotNavMixtureDataset(IterableDataset):
         assert self.families, f"no trajectory shards under {self.release}"
 
         vl_shards = sorted(glob.glob(str(self.release / "general_vl" / "*.jsonl")))
+        # Nav-reasoning Q&A rides the VL (next-token) side of the mixture, so
+        # the paper's 85/15 trajectory:language ratio is preserved -- it is
+        # language supervision about navigation, not waypoint regression.
+        nav_root = _ignored.get("nav_reasoning_root")
+        if nav_root:
+            nav = sorted(g for g in glob.glob(str(Path(nav_root) / "*.jsonl"))
+                         if not g.endswith(".partial"))
+            if nav:
+                vl_shards = vl_shards + nav
+                print(f"[dataset] nav_reasoning: +{len(nav)} shards into the VL stream",
+                      flush=True)
         self.vl_stream = _ShardStream(vl_shards, random.Random(seed + 77)) if vl_shards else None
 
         self.scale = _load_scale_factors(self.release)
@@ -252,7 +272,7 @@ class RobotNavMixtureDataset(IterableDataset):
                                 max(64, int(im.height * scale)) // 2 * 2),
                                Image.BILINEAR)
             frames.append(torch.from_numpy(np.array(im)).permute(2, 0, 1).contiguous())
-        return frames                                        # list of [C, H, W]
+        return frames, frame_ids                             # list of [C, H, W]
 
     def _traj_sample(self, family: str, row: Dict[str, Any]) -> Dict[str, Any]:
         eid = row["episode_id"]
@@ -260,7 +280,7 @@ class RobotNavMixtureDataset(IterableDataset):
         t = int(row["t"])
         hist = row.get("available_history") or list(range(t + 1))
         if self.obs_rand is not None:
-            rgb = self._randomized_frames(ep_dir, hist, t)   # list of [C,H,W]
+            rgb, frame_ids = self._randomized_frames(ep_dir, hist, t)
         else:
             n_hist = min(self.ws - 1, len(hist) - 1) if len(hist) > 1 else 0
             if n_hist > 0:
@@ -280,8 +300,15 @@ class RobotNavMixtureDataset(IterableDataset):
         w[:, 0] = np.clip(w[:, 0] / max(sf["x"], 1e-6), -1, 1)
         w[:, 1] = np.clip(w[:, 1] / max(sf["y"], 1e-6), -1, 1)
         w[:, 2] = np.clip(w[:, 2] / max(sf["yaw"], 1e-6), -1, 1)
+        # Temporal tags for history_type="pre": distance of each retained frame
+        # to the current frame, and to the NEXT retained frame (irregular
+        # stride is otherwise invisible to the model).
+        fid = [int(x) for x in frame_ids]
+        d_cur = [float(t - f) for f in fid]
+        d_next = [float(fid[i + 1] - fid[i]) for i in range(len(fid) - 1)] + [0.0]
         return {
             "sample_type": "traj",
+            "frame_offsets": torch.tensor([d_cur, d_next], dtype=torch.float32).T,
             "rgb": rgb,                                   # [ws, C, H, W]
             "lang": self._instruction(family, row),
             "chunk": torch.from_numpy(w),                 # [K, 3] normalized
@@ -291,6 +318,8 @@ class RobotNavMixtureDataset(IterableDataset):
 
     def _vl_sample(self) -> Dict[str, Any]:
         row = self.vl_stream.next()
+        if "question" in row and "answer" in row:        # nav_reasoning schema
+            return self._nav_reasoning_sample(row)
         conv = row["conversation"]
         user_text = " ".join(c["text"] for c in conv[0]["content"] if c.get("type") == "text")
         answer = " ".join(c["text"] for c in conv[-1]["content"] if c.get("type") == "text")
@@ -299,7 +328,45 @@ class RobotNavMixtureDataset(IterableDataset):
                 "user_text": user_text, "answer_text": answer,
                 "category": row.get("category", "vl")}
 
+    def _nav_reasoning_sample(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Nav-reasoning Q&A -> the VL contract.
+
+        Image paths are stored relative to the family's generated root; the
+        family is recoverable from the shard name (``<family>__<scene>.jsonl``).
+        Views are capped to keep the VL branch's token cost near general-VL.
+        """
+        fam = Path(row.get("_src", "")).name.split("__")[0] or "vln_r2r"
+        base = self.gen_root / fam
+        paths = list(row.get("images_current") or [])[:2]
+        imgs = []
+        for rel in paths:
+            f = base / rel
+            if f.exists():
+                imgs.append(Image.open(f).convert("RGB"))
+        return {"sample_type": "vl", "images": imgs,
+                "user_text": row["question"], "answer_text": row["answer"],
+                "category": row.get("category", "nav_reasoning")}
+
     # ------------------------------------------------------------- iterate --
+    def _apply_worker_sharding(self) -> None:
+        """Re-seed per DataLoader worker (called once at __iter__ time).
+
+        Without this every worker replays the SAME stream, so N workers yield
+        N copies of each sample. Content RNGs are salted by worker id; the
+        batch-TYPE rng is salted by worker id ONLY (never rank), so all ranks
+        still agree on traj-vs-VL at every step (FSDP participation parity).
+        """
+        from torch.utils.data import get_worker_info
+        info = get_worker_info()
+        if info is None or getattr(self, "_worker_sharded", False):
+            return
+        self._worker_sharded = True
+        wid = int(info.id)
+        self.rng = random.Random(self.rng.random() * 1e9 + wid * 104729)
+        self.type_rng = random.Random(self._type_seed + wid * 104729)
+        for fam, stream in self.families.items():
+            stream.rng = random.Random(hash((fam, wid)) % (2 ** 31))
+
     def _one_traj_sample(self) -> Dict[str, Any]:
         fam = self.rng.choices(self.family_names, weights=self.family_w)[0]
         stream = self.families[fam]
@@ -312,24 +379,49 @@ class RobotNavMixtureDataset(IterableDataset):
         return self._traj_sample(fam, stream.next())
 
     def __iter__(self) -> Iterator[Dict[str, Any]]:
+        self._apply_worker_sharding()
         yielded = 0
         if self.mixture_mode == "sample":
             # Per-sample Bernoulli mixing: each batch blends trajectory + VL.
-            # Emitted in batch_size blocks with >=1 trajectory sample forced
-            # per block: multi-rank strategies (FSDP reduce-scatter, sync_dist
-            # logging) hang if ranks disagree on which modules ran, and an
-            # all-VL block would skip the action head entirely. Distortion is
-            # negligible (traj is the 85% majority). The all-traj case is
-            # handled trainer-side with a zero-weighted dummy VL forward.
+            #
+            # force_both_kinds (FSDP ONLY): FSDP shards parameters, so every
+            # rank must join the same collectives every step -- a block that
+            # happens to be all-trajectory skips the LM branch and hangs the
+            # job. Forcing >=1 of each avoids that, but it MEASURABLY skews the
+            # mixture at small micro-batches (batch 8: 15% VL -> 18.4%, since
+            # ~27% of blocks would naturally contain no VL and get one added).
+            # DDP with find_unused_parameters tolerates heterogeneous branch
+            # usage, so it leaves this OFF and keeps the true 85/15.
             while True:
                 block = []
-                for _ in range(self.batch_size):
-                    if self.vl_stream is not None and self.rng.random() >= self.mix_traj:
-                        block.append(self._vl_sample())
-                    else:
-                        block.append(self._one_traj_sample())
-                if all(s["sample_type"] == "vl" for s in block):
-                    block[self.rng.randrange(len(block))] = self._one_traj_sample()
+                if self.force_both_kinds and self.vl_stream is not None:
+                    # Deterministic quota with carry: each block takes
+                    # floor(vl_rate*bs + carry) VL samples and carries the
+                    # remainder, so the LONG-RUN ratio is exactly 85/15 while
+                    # every block still holds >=1 of each (what FSDP needs).
+                    # Bernoulli + "force one in" cannot do both: it skews to
+                    # 18.4% VL at batch 8.
+                    want = (1.0 - self.mix_traj) * self.batch_size + self._vl_carry
+                    n_vl = int(want)
+                    self._vl_carry = want - n_vl
+                    n_vl = max(1, min(self.batch_size - 1, n_vl))
+                    kinds = ["vl"] * n_vl + ["traj"] * (self.batch_size - n_vl)
+                    self.rng.shuffle(kinds)
+                    block = [self._vl_sample() if k == "vl" else self._one_traj_sample()
+                             for k in kinds]
+                else:
+                    for _ in range(self.batch_size):
+                        if self.vl_stream is not None and self.rng.random() >= self.mix_traj:
+                            block.append(self._vl_sample())
+                        else:
+                            block.append(self._one_traj_sample())
+                if False:
+                    kinds = {s["sample_type"] for s in block}
+                    if ("vl" not in kinds and self.vl_stream is not None
+                            and len(block) > 1):
+                        block[self.rng.randrange(len(block))] = self._vl_sample()
+                    if all(s["sample_type"] == "vl" for s in block):
+                        block[self.rng.randrange(len(block))] = self._one_traj_sample()
                 for s in block:
                     yield s
                     yielded += 1
@@ -410,5 +502,7 @@ class RobotNavMixtureDataset(IterableDataset):
             "action_chunck": action_chunck,
             "chunck_mask": chunck_mask,
             "raw_text": texts,
+            "frame_offsets": torch.stack(
+                [s["frame_offsets"] for s in samples]),      # [B, ws, 2]
             "data_source": "robotnav_traj",
         }

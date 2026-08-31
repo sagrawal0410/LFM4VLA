@@ -136,6 +136,43 @@ def load_objectnav(which: str, split: str, limit: int):
     return out
 
 
+def select_history(n_frames: int, n_hist: int = 8, mode: str = "uniform",
+                   alpha: float = 2.0, jitter: bool = False, rng=None):
+    """Indices of the history frames to feed, oldest -> newest (current last).
+
+    mode:
+      uniform  — evenly spread over the whole past (matches non-rand training)
+      latest   — the n_hist most recent consecutive frames (sliding window)
+      recency  — power-law spacing: dense near the present, sparse far back,
+                 while still anchoring the oldest slot at frame 0. alpha=1
+                 degenerates to uniform; larger alpha skews harder to recent.
+                 With jitter, the older slots are drawn randomly inside their
+                 bucket so repeat visits don't always see identical old frames.
+    """
+    cur = n_frames - 1
+    if n_frames <= 1:
+        return [0]
+    k = min(n_hist, n_frames - 1)
+    if mode == "latest":
+        idx = list(range(max(0, cur - k), cur))
+    elif mode == "recency":
+        idx, prev = [], None
+        for j in range(k, 0, -1):                 # far -> near
+            off = int(round(((j / k) ** alpha) * cur))
+            lo = int(round((((j - 1) / k) ** alpha) * cur))
+            if jitter and rng is not None and lo < off:
+                off = rng.randint(lo + 1, off)
+            i = max(0, min(cur - 1, cur - off))
+            if prev is not None and i <= prev:     # keep strictly increasing
+                i = min(cur - 1, prev + 1)
+            idx.append(i)
+            prev = i
+    else:
+        idx = list(np.unique(np.linspace(0, cur - 1, k).astype(int)))
+    idx = sorted(set(int(i) for i in idx if 0 <= i < cur))
+    return idx + [cur]
+
+
 def suite_stubs(name: str):
     notes = {
         "hm3d_ovon": "HM3D-OVON annotations are staged under robotnav_sources/"
@@ -162,6 +199,8 @@ def rollout(sim, client, ep, args, recorder):
     start_geo = core.geodesic(sim, ep["start_pos"], ep["goal"])
     ref = ep.get("ref_path")
     ref_dense = core.densify_path(ref) if ref and len(ref) > 1 else None
+    import random as _random
+    hist_rng = _random.Random(hash(ep["id"]) % (2 ** 31))
     from PIL import Image
     frames_hist = []
     positions = [list(ep["start_pos"])]
@@ -171,15 +210,16 @@ def rollout(sim, client, ep, args, recorder):
         rgb = obs["front"][..., :3]
         pil = Image.fromarray(rgb)
         frames_hist.append(pil)
-        # fixed training recipe: up to ws-1 uniformly spaced history + current
-        if len(frames_hist) > 1:
-            idx = np.unique(np.linspace(0, len(frames_hist) - 2,
-                                        min(8, len(frames_hist) - 1)).astype(int))
-            sel = [frames_hist[i] for i in idx] + [frames_hist[-1]]
-        else:
-            sel = [frames_hist[-1]]
+        hidx = select_history(len(frames_hist), n_hist=8,
+                              mode=args.history_mode, alpha=args.history_alpha,
+                              jitter=args.history_jitter, rng=hist_rng)
+        sel = [frames_hist[i] for i in hidx]
+        if step % 20 == 0:
+            print(f"[hist] mode={args.history_mode} step={step} idx={hidx}",
+                  flush=True)
         t0 = time.time()
-        wps = client.predict(ep["instruction"], sel, ep["family"])
+        wps = client.predict(ep["instruction"], sel, ep["family"],
+                             frame_ids=hidx)
         dt = time.time() - t0
         action = ctrl.act(wps)
         st = sim.get_agent(0).get_state()
@@ -228,6 +268,13 @@ def main():
     ap.add_argument("--easy", action="store_true",
                     help="only short-instruction episodes with the goal "
                          "nearby, same floor, inside the initial camera FOV")
+    ap.add_argument("--history-mode", default="uniform",
+                    choices=["uniform", "latest", "recency"],
+                    help="how the 8 history frames are chosen each step")
+    ap.add_argument("--history-alpha", type=float, default=2.0,
+                    help="recency mode: >1 skews toward recent frames")
+    ap.add_argument("--history-jitter", action="store_true",
+                    help="recency mode: randomize the older slots")
     ap.add_argument("--max-instr", type=int, default=130,
                     help="easy mode: max instruction length in characters "
                          "(RxR needs ~450; R2R fits in 130)")

@@ -15,6 +15,12 @@ from utils.setup_callback import SetupCallback
 def _build_strategy(strategy_name):
     if strategy_name in (None, "auto", "ddp"):
         return "auto"
+    if strategy_name == "ddp_find_unused_parameters_true":
+        # down_sample heads (GR00T / SmolVLA) never consume the backbone's
+        # learnable ActionQuery token, and SmolVLA additionally taps every
+        # layer's hidden states. DDP rejects params that do not reach the
+        # loss unless told to expect them.
+        return "ddp_find_unused_parameters_true"
     if strategy_name == "deepspeed_stage_2":
         from lightning.pytorch.strategies import DeepSpeedStrategy
 
@@ -91,14 +97,23 @@ def _build_loader(dataset, variant, train: bool) -> DataLoader:
     pipeline inside a forked DataLoader worker deadlocks (no batch is ever yielded).
     """
     if isinstance(dataset, IterableDataset):
-        return DataLoader(
-            dataset,
+        # TF-backed RLDS streams must stay at 0 (TensorFlow does not survive
+        # os.fork()). Pure-python iterables (RobotNav) can use workers if the
+        # dataset shards its RNGs per worker — opt in with iterable_num_workers.
+        nw = int(variant.get("iterable_num_workers", 0))
+        if nw and not hasattr(dataset, "_apply_worker_sharding"):
+            nw = 0
+        kwargs = dict(
             batch_size=variant["batch_size"],
-            num_workers=0,
+            num_workers=nw,
             pin_memory=torch.cuda.is_available(),
             collate_fn=dataset.collater,
             drop_last=True,
         )
+        if nw > 0:
+            kwargs["persistent_workers"] = True
+            kwargs["prefetch_factor"] = int(variant.get("prefetch_factor", 4))
+        return DataLoader(dataset, **kwargs)
     num_workers = int(variant.get("num_workers", 4))
     loader_kwargs = dict(
         batch_size=variant["batch_size"],
@@ -177,10 +192,11 @@ def experiment(variant):
     )
     if "limit_val_batches" in trainer_cfg:
         trainer_kwargs["limit_val_batches"] = trainer_cfg["limit_val_batches"]
-    if trainer_cfg.get("strategy") == "fsdp":
-        # FSDP flat-params require uniform dtype; the backbone loads in bf16
-        # while heads are built fp32. Cast everything to fp32 (bf16-mixed
-        # autocast still does compute in bf16, matching the other runs).
+    if str(trainer_cfg.get("strategy", "")).startswith(("fsdp", "ddp")):
+        # Uniform module dtype: the backbone loads in bf16 while heads are
+        # built fp32. FSDP requires it (flat-params), and DDP needs it too or
+        # mixed-dtype ops raise "Expected Float, got BFloat16". bf16-mixed
+        # autocast still does the compute in bf16 either way.
         trainer_module.float()
         # Tied lm_head/embedding share one tensor; FSDP(use_orig_params)
         # registers the alias flattened, making checkpoint save/load shapes

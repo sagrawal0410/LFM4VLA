@@ -179,18 +179,32 @@ class WaypointController:
     Waypoint convention (matches training): x forward (m), y left (m),
     yaw (rad, CCW). Predicts STOP when the final waypoint stays within
     stop_radius (the policy has no explicit stop token).
+
+    stop_radius is 0.50 m: per-waypoint accuracy is ~0.25 m ADE, so the old
+    0.24 m threshold demanded sub-noise precision and the policy essentially
+    never fired it (every held-out episode ran to the step cap while passing
+    within 5 m of the goal).
     """
 
     def __init__(self, turn_deg: float, lookahead_m: float = 0.30,
-                 stop_radius: float = 0.24):
+                 stop_radius: float = 0.50):
         self.turn_rad = math.radians(turn_deg)
         self.lookahead = lookahead_m
         self.stop_radius = stop_radius
 
     def act(self, waypoints: np.ndarray) -> str:
         w = np.asarray(waypoints, dtype=np.float32)
-        if float(np.linalg.norm(w[-1, :2])) < self.stop_radius:
+        trans = float(np.linalg.norm(w[-1, :2]))
+        yaw8 = float(w[-1, 2])
+        # Training data encodes turn-in-place (e.g. episode-start turnarounds,
+        # 18% of t=0 samples) as (0, 0, yaw) plans: position channels alone
+        # cannot distinguish "arrived" from "rotate first". Stop only when the
+        # plan is at rest in BOTH position and heading; execute the predicted
+        # yaw when the plan is rotation-dominant.
+        if trans < self.stop_radius and abs(yaw8) < math.radians(12.0):
             return "stop"
+        if trans < self.lookahead and abs(yaw8) >= self.turn_rad / 2.0:
+            return "turn_left" if yaw8 > 0 else "turn_right"
         tgt = None
         for i in range(w.shape[0]):
             if float(np.linalg.norm(w[i, :2])) >= self.lookahead:
@@ -386,8 +400,10 @@ class PolicyClient:
         if not ready.startswith("READY"):
             raise RuntimeError(f"policy server failed to start: {ready!r}")
 
-    def predict(self, instruction: str, frames, family: str) -> np.ndarray:
-        payload = {"instruction": instruction, "family": family, "frames": []}
+    def predict(self, instruction: str, frames, family: str,
+                frame_ids=None) -> np.ndarray:
+        payload = {"instruction": instruction, "family": family, "frames": [],
+                   "frame_ids": list(frame_ids) if frame_ids else None}
         for f in frames:
             buf = io.BytesIO()
             f.save(buf, format="JPEG", quality=92)

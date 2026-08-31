@@ -62,6 +62,7 @@ class RobotNavTrainer(BaseTrainer):
             raw_text=inputs["raw_text"],
             rel_state=inputs["rel_state"],
             depth=inputs["depth"],
+            frame_offsets=inputs.get("frame_offsets"),
             mode="inference",
         )
         if isinstance(pred, dict):
@@ -171,6 +172,9 @@ class RobotNavTrainer(BaseTrainer):
                 "data_source": "robotnav_traj",
                 "family": ["vln_r2r"],
                 "wp_scale": torch.ones(1, 3, device=dev),
+                "frame_offsets": torch.stack([
+                    torch.arange(ws - 1, -1, -1, dtype=torch.float32),
+                    torch.ones(ws)], -1)[None].to(dev),
             }
         return self._dummy_traj
 

@@ -47,6 +47,20 @@ def main():
     txt = open(f"{rel}/scale_factors.yaml").read()
     scales = json.loads(txt[txt.index("{"):])
 
+    def _offsets(ids, ws):
+        """[ws, 2] (dist-to-current, dist-to-next-kept) from real frame ids."""
+        if not ids:
+            d = list(range(ws - 1, -1, -1))
+            ids = [(-x) for x in d]
+        ids = list(ids)
+        while len(ids) < ws:
+            ids.insert(0, ids[0])
+        ids = ids[-ws:]
+        cur = ids[-1]
+        d_cur = [float(cur - i) for i in ids]
+        d_next = [float(ids[k + 1] - ids[k]) for k in range(len(ids) - 1)] + [0.0]
+        return torch.tensor([d_cur, d_next], dtype=torch.float32).T[None]
+
     ws = int(variant["window_size"])
     K = int(variant["fwd_pred_next_n"])
     proto.write("READY\n")
@@ -77,6 +91,7 @@ def main():
                 "data_source": "robotnav_traj",
                 "family": [fam],
                 "wp_scale": torch.tensor([[sf["x"], sf["y"], sf["yaw"]]]),
+                "frame_offsets": _offsets(req.get("frame_ids"), ws),
             }
             with torch.no_grad():
                 pred = module._predict_waypoints(batch)   # [1, K, 3] normalized

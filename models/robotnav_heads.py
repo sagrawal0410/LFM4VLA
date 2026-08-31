@@ -66,6 +66,61 @@ def _flatten_labels(actions, action_masks, window: int):
 
 
 # ======================================================================= MLP
+class _TemporalReadout(nn.Module):
+    """Post-fusion for the regression heads: causal temporal encoder + query readout.
+
+    Stage 1 — 1-2 layers of causal self-attention over the w slot summaries
+    (with RELATIVE offset embeddings, since the history stride is variable),
+    so slot j absorbs slots <= j into a running representation.
+
+    Stage 2 — learned action queries cross-attend (also causally) over those
+    enriched slots. This is the part a plain "take the last position" design
+    misses: the query can retrieve straight from slot i if that is where the
+    relevant evidence sits, instead of relying on slot j to have preserved it.
+
+    Output keeps the per-slot shape, so the existing decoder, the [B, w, K, 3]
+    contract, and per-slot supervision all stay intact.
+    """
+
+    def __init__(self, dim: int, layers: int = 2, heads: int = 8,
+                 n_query: int = 1, max_window: int = 16):
+        super().__init__()
+        self.offset_emb = nn.Parameter(torch.zeros(max_window, dim))
+        nn.init.trunc_normal_(self.offset_emb, std=0.02)
+        self.enc = nn.ModuleList([
+            nn.TransformerEncoderLayer(dim, heads, dim * 4, batch_first=True,
+                                       norm_first=True, dropout=0.0)
+            for _ in range(layers)])
+        self.queries = nn.Parameter(torch.zeros(1, n_query, dim))
+        nn.init.trunc_normal_(self.queries, std=0.02)
+        self.read = nn.MultiheadAttention(dim, heads, batch_first=True)
+        self.out = nn.Linear(dim * n_query, dim)
+        self.norm = nn.LayerNorm(dim)
+        self.n_query = n_query
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: [b, w, D] -> [b, w, D] (temporally fused, causal)."""
+        b, w, d = x.shape
+        idx = torch.arange(w, device=x.device)
+        # position j is "now" for its own prediction -> tag by distance from j
+        x = x + self.offset_emb.to(x.dtype)[(w - 1 - idx).clamp(
+            0, self.offset_emb.shape[0] - 1)][None]
+        causal = torch.triu(torch.ones(w, w, device=x.device, dtype=torch.bool),
+                            diagonal=1)
+        h = x
+        for layer in self.enc:                       # stage 1: causal self-attn
+            h = layer(h, src_mask=causal)
+
+        # stage 2: per-slot queries read over slots <= j
+        q = self.queries.to(x.dtype).expand(b * w, -1, -1)
+        mem = h[:, None].expand(b, w, w, d).reshape(b * w, w, d)
+        kpm = causal[None].expand(b, w, w).reshape(b * w, w)
+        r, _ = self.read(q, mem, mem, key_padding_mask=kpm, need_weights=False)
+        r = torch.nan_to_num(r)                      # slot 0 attends to nothing
+        r = self.out(r.reshape(b * w, self.n_query * d)).view(b, w, d)
+        return self.norm(h + r)
+
+
 class RobotNavMLPHead(BasePolicyHead):
     """Qwen-RobotNav head: a simple MLP on the ActionQuery token feature that
     regresses the K normalized waypoints (x, y, yaw) in [-1, 1] with MSE.
@@ -82,6 +137,11 @@ class RobotNavMLPHead(BasePolicyHead):
         kwargs.pop("down_sample", None)
         super().__init__(hidden_size, action_dim, latent=latent, **kwargs)
         self.fwd_pred_next_n = fwd_pred_next_n
+        self.temporal = _TemporalReadout(
+            in_features * latent,
+            layers=int(kwargs.get("history_layers", 2)),
+            n_query=int(kwargs.get("history_queries", 1)),
+        ) if kwargs.get("history_fusion", False) else None
         self.net = nn.Sequential(
             nn.LayerNorm(in_features * latent),
             nn.Linear(in_features * latent, hidden_size),
@@ -95,7 +155,10 @@ class RobotNavMLPHead(BasePolicyHead):
     def forward(self, tok_seq: torch.Tensor, actions=None, action_masks=None,
                 **kwargs) -> Dict[str, Optional[torch.Tensor]]:
         b, w = tok_seq.shape[:2]
-        x = rearrange(tok_seq, "b w n d -> (b w) (n d)")
+        x = rearrange(tok_seq, "b w n d -> b w (n d)")
+        if self.temporal is not None and w > 1:
+            x = self.temporal(x)
+        x = x.reshape(b * w, -1)
         pred = self.net(x).view(b, w, self.fwd_pred_next_n, self.action_dim)
         return {"actions": pred, "gripper": None}
 
@@ -130,6 +193,11 @@ class WaypointFCDecoder(BasePolicyHead):
         kwargs.pop("down_sample", None)
         super().__init__(hidden_size, action_dim, latent=latent, **kwargs)
         self.fwd_pred_next_n = fwd_pred_next_n
+        self.temporal = _TemporalReadout(
+            in_features * latent,
+            layers=int(kwargs.get("history_layers", 2)),
+            n_query=int(kwargs.get("history_queries", 1)),
+        ) if kwargs.get("history_fusion", False) else None
         # Stacked heads, mirroring FCDecoder: trunk MLP then MLPTanh action head.
         self.mlp = nn.Sequential(
             nn.Linear(in_features * latent, 1024),
@@ -146,7 +214,10 @@ class WaypointFCDecoder(BasePolicyHead):
     def forward(self, tok_seq: torch.Tensor, actions=None, action_masks=None,
                 **kwargs) -> Dict[str, Optional[torch.Tensor]]:
         b, w = tok_seq.shape[:2]
-        x = rearrange(tok_seq, "b w n d -> (b w) (n d)")
+        x = rearrange(tok_seq, "b w n d -> b w (n d)")
+        if self.temporal is not None and w > 1:
+            x = self.temporal(x)
+        x = x.reshape(b * w, -1)
         pred = self.actions(self.mlp(x)).view(
             b, w, self.fwd_pred_next_n, self.action_dim)
         return {"actions": pred, "gripper": None}
@@ -245,6 +316,71 @@ class _DiTCrossBlock(nn.Module):
 
 
 # ==================================================================== GR00T
+class _CausalHistoryMemory(nn.Module):
+    """Cross-attention memory over preceding window slots (post-fusion).
+
+    Each slot's encoder tokens are attention-pooled to ``n_tokens`` summaries;
+    slot j then receives the summaries of slots i < j, tagged with a learned
+    RELATIVE offset embedding (j - i). Ordinal position alone is not enough
+    here: the history stride is variable (uniform-spread vs latest-window
+    sampling), so the model needs to know how far back each summary is.
+
+    Causal by construction, so every slot keeps a valid prediction and the
+    per-slot supervision stays usable. Cost is linear in the window: the
+    denoiser's action tokens are the only queries.
+    """
+
+    def __init__(self, dim: int, n_tokens: int = 32, heads: int = 8,
+                 max_window: int = 16, pool: str = "mean"):
+        super().__init__()
+        self.n_tokens = n_tokens
+        self.pool_mode = pool
+        if pool == "attn":
+            # Learned pooling: expressive, but ~4·dim² params. Affordable when
+            # instantiated ONCE (GR00T); ruinous per-VLM-layer (SmolVLA would
+            # pay 507M on a 2048-dim backbone), hence "mean" is the default.
+            self.queries = nn.Parameter(torch.zeros(1, n_tokens, dim))
+            nn.init.trunc_normal_(self.queries, std=0.02)
+            self.pool = nn.MultiheadAttention(dim, heads, batch_first=True)
+        self.offset_emb = nn.Parameter(torch.zeros(max_window, dim))
+        nn.init.trunc_normal_(self.offset_emb, std=0.02)
+        self.norm = nn.LayerNorm(dim)
+
+    def _summarize(self, x: torch.Tensor,
+                   key_padding: Optional[torch.Tensor]) -> torch.Tensor:
+        """[(b w), S, D] -> [(b w), k, D]; padding-aware segment means."""
+        if self.pool_mode == "attn":
+            q = self.queries.to(x.dtype).expand(x.shape[0], -1, -1)
+            out, _ = self.pool(q, x, x, key_padding_mask=key_padding,
+                               need_weights=False)
+            return out
+        valid = (~key_padding).to(x.dtype) if key_padding is not None \
+            else x.new_ones(x.shape[:2])
+        num = F.adaptive_avg_pool1d((x * valid[..., None]).transpose(1, 2),
+                                    self.n_tokens).transpose(1, 2)
+        den = F.adaptive_avg_pool1d(valid[:, None], self.n_tokens).transpose(1, 2)
+        return num / den.clamp(min=1e-6)
+
+    def forward(self, x: torch.Tensor, b: int, w: int,
+                key_padding: Optional[torch.Tensor] = None):
+        """x: [(b w), S, D] -> memory [(b w), w*k, D], pad mask [(b w), w*k]."""
+        bw, _, d = x.shape
+        pooled = self._summarize(x, key_padding)           # [(b w), k, D]
+        k = pooled.shape[1]
+        pooled = self.norm(pooled).view(b, w, k, d)
+
+        idx = torch.arange(w, device=x.device)
+        off = (idx[:, None] - idx[None, :]).clamp(0, self.offset_emb.shape[0] - 1)
+        # mem[b, view j, source i, k, d]
+        mem = pooled[:, None].expand(b, w, w, k, d)
+        mem = mem + self.offset_emb.to(x.dtype)[off][None, :, :, None, :]
+        mem = mem.reshape(b * w, w * k, d)
+
+        valid = (idx[None, :] < idx[:, None])              # [view j, source i]
+        pad = (~valid)[None, :, :, None].expand(b, w, w, k).reshape(b * w, w * k)
+        return mem, pad
+
+
 class GR00TFlowMatchingHead(BasePolicyHead):
     """GR00T-N1.7-style flow-matching decoder.
 
@@ -277,6 +413,12 @@ class GR00TFlowMatchingHead(BasePolicyHead):
         self.sa_blocks = nn.ModuleList(
             [_SelfAttnBlock(sa_dim, sa_heads, mlp_ratio) for _ in range(sa_layers)]
         )
+        # Post-fusion memory over the window (off by default: existing runs and
+        # checkpoints are unaffected until a config opts in).
+        self.history = _CausalHistoryMemory(
+            sa_dim, n_tokens=int(kwargs.get("history_tokens", 32)),
+            pool=str(kwargs.get("history_pool", "attn")),   # single instance
+        ) if kwargs.get("history_fusion", False) else None
         self.t_embed = TimestepEmbedder(dit_dim)
         self.action_in = nn.Linear(action_dim, dit_dim)
         self.state_in = nn.Linear(state_dim, dit_dim) if state_dim > 0 else None
@@ -298,13 +440,21 @@ class GR00TFlowMatchingHead(BasePolicyHead):
     # ------------------------------------------------------------- encoding
     def _encode_ctx(self, tok_seq: torch.Tensor,
                     encoder_attention_mask: Optional[torch.Tensor]):
+        b, w = tok_seq.shape[:2]
         x = rearrange(tok_seq, "b w s d -> (b w) s d")
         x = self.in_proj(self.in_norm(x))
         pad = None
         if encoder_attention_mask is not None:
             pad = encoder_attention_mask.reshape(x.shape[0], -1).bool()
-        for blk in self.sa_blocks:
+        for blk in self.sa_blocks:                    # per-slot: 9*S^2, not (9S)^2
             x = blk(x, key_padding=pad)
+        if self.history is not None and w > 1:
+            # Append preceding slots' pooled summaries to the DiT's K/V set.
+            mem, mem_pad = self.history(x, b, w, key_padding=pad)
+            x = torch.cat([x, mem], dim=1)
+            zeros = mem_pad.new_zeros(x.shape[0], x.shape[1] - mem_pad.shape[1]) \
+                if pad is None else pad
+            pad = torch.cat([zeros.bool(), mem_pad], dim=1)
         return x, pad
 
     def _velocity(self, x_t: torch.Tensor, t: torch.Tensor, ctx: torch.Tensor,
@@ -479,6 +629,16 @@ class SmolVLAFlowMatchingHead(BasePolicyHead):
             cls = _ExpertSelfLayer if l % 2 == 0 else _ExpertCrossLayer
             layers.append(cls(expert_dim, in_features, expert_heads, mlp_ratio))
         self.layers = nn.ModuleList(layers)
+        # One memory per VLM layer (each layer conditions on its own features).
+        # One per VLM layer (each conditions on its own representation space),
+        # so pooling must stay parameter-light: "mean" keeps this ~1M total
+        # instead of ~500M with learned per-layer attention pooling.
+        self.history = nn.ModuleList([
+            _CausalHistoryMemory(in_features,
+                                 n_tokens=int(kwargs.get("history_tokens", 32)),
+                                 pool=str(kwargs.get("history_pool", "mean")))
+            for _ in range(num_vlm_layers)
+        ]) if kwargs.get("history_fusion", False) else None
         self.out_norm = nn.LayerNorm(expert_dim)
         self.out_proj = nn.Linear(expert_dim, action_dim)
         self._stash: Dict[str, torch.Tensor] = {}
@@ -513,6 +673,18 @@ class SmolVLAFlowMatchingHead(BasePolicyHead):
         pad = None
         if encoder_attention_mask is not None:
             pad = encoder_attention_mask.reshape(feats[0].shape[0], -1).bool()
+        if self.history is not None and w > 1:
+            # Same post-fusion memory, applied to every layer's K/V set: the
+            # action tokens are the only queries, so cost stays linear in w.
+            new_feats, new_pad = [], None
+            for l, f in enumerate(feats):
+                mem, mem_pad = self.history[l](f, b, w, key_padding=pad)
+                new_feats.append(torch.cat([f, mem], dim=1))
+                if new_pad is None:
+                    base = (pad if pad is not None
+                            else mem_pad.new_zeros(f.shape[0], f.shape[1]).bool())
+                    new_pad = torch.cat([base, mem_pad], dim=1)
+            feats, pad = new_feats, new_pad
 
         if actions is not None and actions[0] is not None:  # training
             x1, mask = _flatten_labels(actions, action_masks, w)

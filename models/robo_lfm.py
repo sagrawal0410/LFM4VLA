@@ -10,6 +10,8 @@ Preprocessing contract (matches BaseTrainer + RoboVLMBackbone pipeline):
 
 from __future__ import annotations
 
+import math
+
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -20,6 +22,48 @@ from PIL import Image
 from models.model_backbone import RoboVLMBackbone
 
 ImageInput = Union[Image.Image, torch.Tensor, np.ndarray]
+
+
+def _sinusoid(x: torch.Tensor, n_freq: int) -> torch.Tensor:
+    """Scalar offsets -> [..., 2*n_freq] sinusoidal features."""
+    half = torch.exp(
+        torch.arange(n_freq, device=x.device, dtype=torch.float32)
+        * (-math.log(10000.0) / max(n_freq - 1, 1)))
+    a = x.float().unsqueeze(-1) * half
+    return torch.cat([torch.sin(a), torch.cos(a)], dim=-1)
+
+
+class FrameOffsetEmbedding(torch.nn.Module):
+    """Temporal tags for ``history_type='pre'`` packing.
+
+    The retained frames are NOT evenly spaced (uniform-spread vs latest-window
+    sampling), so ordinal slot position is not enough. Each frame is tagged
+    with two sinusoidally-encoded distances, in frames:
+
+        d_cur  = index(current frame) - index(this frame)
+        d_next = index(next retained frame) - index(this frame)
+
+    d_cur says how stale the observation is; d_next says how big the jump to
+    the following retained frame is, which is what makes an irregular stride
+    legible (e.g. frames [1, 4] with current 6 -> frame 1: d_cur 5, d_next 3;
+    frame 4: d_cur 2, d_next 2).
+
+    Zero-initialised output projection, so the tag is a no-op at step 0 and
+    existing checkpoints keep their behaviour until it is learned.
+    """
+
+    def __init__(self, dim: int, n_freq: int = 64):
+        super().__init__()
+        self.n_freq = n_freq
+        self.proj = torch.nn.Linear(4 * n_freq, dim)
+        torch.nn.init.zeros_(self.proj.weight)
+        torch.nn.init.zeros_(self.proj.bias)
+
+    def forward(self, offsets: torch.Tensor) -> torch.Tensor:
+        """offsets: [B, W, 2] (d_cur, d_next) -> [B, W, dim]."""
+        f = torch.cat([_sinusoid(offsets[..., 0], self.n_freq),
+                       _sinusoid(offsets[..., 1], self.n_freq)], dim=-1)
+        return self.proj(f.to(self.proj.weight.dtype))
 
 
 class RoboLFM25VL(RoboVLMBackbone):
@@ -414,6 +458,7 @@ class RoboLFM25VL(RoboVLMBackbone):
         rel_state=None,
         depth=None,
         mode: str = "train",
+        frame_offsets: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         loss: Dict[str, Any] = {}
@@ -601,6 +646,21 @@ class RoboLFM25VL(RoboVLMBackbone):
                 )
 
         if history_type == "pre":
+            # Tag each frame's VISUAL tokens with its temporal offsets before
+            # the slots are concatenated, so the LLM can tell how far back each
+            # frame is and how uneven the stride was. Text tokens are left
+            # alone (the instruction is identical in every slot).
+            if getattr(self, "frame_offset_embed", None) is not None:
+                if frame_offsets is None:                 # fall back: 8,7,...,0
+                    ar = torch.arange(seq_len, device=multimodal_embeds.device)
+                    d_cur = (seq_len - 1 - ar).float()
+                    d_next = torch.ones_like(d_cur); d_next[-1] = 0.0
+                    frame_offsets = torch.stack([d_cur, d_next], -1)[None].expand(
+                        bs, seq_len, 2)
+                temb = self.frame_offset_embed(
+                    frame_offsets.to(multimodal_embeds.device))     # [b, l, d]
+                temb = rearrange(temb, "b l d -> (b l) 1 d").to(multimodal_embeds.dtype)
+                multimodal_embeds = multimodal_embeds + temb * image_token_mask[..., None]
             multimodal_embeds = rearrange(multimodal_embeds, "(b l) n d -> b (l n) d", l=seq_len)
             if multimodal_attention_mask is not None:
                 multimodal_attention_mask = rearrange(
@@ -649,16 +709,27 @@ class RoboLFM25VL(RoboVLMBackbone):
         head_kwargs: Dict[str, Any] = {}
 
         if self.is_vla_adapter:
-            if history_type == "pre":
-                raise NotImplementedError(
-                    "VLA-Adapter packing does not support history_type='pre'; use 'post'."
-                )
             # Bridge Attention consumes every layer (embed + transformer blocks).
             num_task_tokens = int(self.act_head_configs.get("num_task_tokens", 512))
+            hs_pack = output.hidden_states
+            img_m, act_m = image_token_mask, action_token_mask
+            if history_type == "pre":
+                # The packer indexes ONE slot per row ([B*T, S, D] + [B*T, S]
+                # masks); under "pre" the slots were concatenated into [B, T*S].
+                # Slice them back — cross-frame mixing already happened inside
+                # the LLM, so Bridge Attention now reads history-aware features
+                # at every layer. (Purely a layout fix: VLA-Adapter's
+                # contribution is depth-wise fusion, orthogonal to how
+                # timesteps are packed.)
+                hs_pack = tuple(
+                    rearrange(h, "b (l n) d -> (b l) n d", l=seq_len)
+                    for h in hs_pack)
+                img_m = rearrange(img_m, "b (l n) -> (b l) n", l=seq_len)
+                act_m = rearrange(act_m, "b (l n) -> (b l) n", l=seq_len)
             action_hs = self._pack_vla_adapter_features(
-                output.hidden_states,
-                image_token_mask=image_token_mask,
-                action_token_mask=action_token_mask,
+                hs_pack,
+                image_token_mask=img_m,
+                action_token_mask=act_m,
                 num_task_tokens=num_task_tokens,
                 bs=bs,
                 seq_len=seq_len,
@@ -669,6 +740,15 @@ class RoboLFM25VL(RoboVLMBackbone):
             output_hs = _pre_norm_capture.get("hs", output.hidden_states[-1]).clone()
             if history_type == "pre":
                 output_hs = rearrange(output_hs, "b (l n) d -> (b l) n d", l=seq_len)
+                # The token masks were flattened alongside the embeddings; put
+                # them back on the same per-slot layout or the boolean index
+                # below mismatches ([b, l*n] vs [(b l), n, d]).
+                # (depth_pred_token_mask is never flattened above, so it is
+                # already on the per-slot layout and must be left alone.)
+                # down_sample heads have no ActionQuery tokens -> mask is None.
+                if action_token_mask is not None:
+                    action_token_mask = rearrange(
+                        action_token_mask, "b (l n) -> (b l) n", l=seq_len)
 
             if action_space == "continuous":
                 action_hs = output_hs[action_token_mask].reshape(
@@ -687,7 +767,15 @@ class RoboLFM25VL(RoboVLMBackbone):
                 # over VLM features (RobotNav FM heads).
                 head_kwargs["encoder_attention_mask"] = multimodal_attention_mask
                 if self.act_head_configs.get("type") == "SmolVLAFlowMatchingHead":
-                    head_kwargs["per_layer_hs"] = output.hidden_states
+                    hs_all = output.hidden_states
+                    if history_type == "pre":
+                        # Slice the fused sequence back per slot: cross-frame
+                        # mixing already happened inside the LLM, and the
+                        # expert expects [(b l), n, d] like the action tokens.
+                        hs_all = tuple(
+                            rearrange(h, "b (l n) d -> (b l) n d", l=seq_len)
+                            for h in hs_all)
+                    head_kwargs["per_layer_hs"] = hs_all
             else:
                 raise ValueError(f"Unsupported action space {action_space}")
 

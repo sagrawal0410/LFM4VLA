@@ -318,6 +318,33 @@ class BaseTrainer(pl.LightningModule):
             frame = frame.to(torch.uint8)
         return to_pil_image(frame)
 
+    def _frame_tags(self, batch, seq_len):
+        """Per-(sample, slot) natural-language temporal tags, or None.
+
+        Only used with act_head.history_type == "pre", where all window slots
+        are packed into ONE sequence and the model would otherwise have no way
+        to tell which frame is which. The tag states the frame's distance from
+        the present in steps, which also makes an irregular history stride
+        explicit (frames are not evenly spaced).
+        """
+        ah = self.configs.get("act_head") or {}
+        if ah.get("history_type", "post") != "pre":
+            return None
+        if not ah.get("language_temporal_tags", True):
+            return None
+        offs = batch.get("frame_offsets")
+        n = len(batch["text"])
+        out = []
+        for i in range(n):
+            row = []
+            for j in range(seq_len):
+                d = (int(offs[i][j][0].item()) if offs is not None
+                     else seq_len - 1 - j)
+                row.append("Current view. " if d <= 0
+                           else f"View from {d} step{'' if d == 1 else 's'} ago. ")
+            out.append(row)
+        return out
+
     def _build_language_inputs(self, batch, rgb):
         seq_len = self.configs["window_size"]
 
@@ -336,12 +363,17 @@ class BaseTrainer(pl.LightningModule):
             texts = []
             # len() == shape[0] for tensors; also supports list-of-tensor rgb
             # (RobotNav keeps native per-episode resolutions, so no stacking).
+            # history_type="pre": temporal order is communicated with
+            # natural-language tags on each frame's text (paper's approach --
+            # no architectural change, no positional embeddings).
+            tags = self._frame_tags(batch, seq_len)
             for i in range(len(rgb)):
                 for j in range(seq_len):
                     image_inputs.append(self._frame_to_pil(rgb[i][j]))
                     if images_per_sample == 2:
                         image_inputs.append(self._frame_to_pil(hand_rgb[i][j]))
-                    texts.append(batch["text"][i])
+                    pre = tags[i][j] if tags is not None else ""
+                    texts.append(pre + batch["text"][i])
 
             image_inputs = self.model.process_vision_info(image_inputs)
             if hasattr(self.model, "build_processor_inputs"):
@@ -446,7 +478,12 @@ class BaseTrainer(pl.LightningModule):
         if rel_state is not None:
             rel_state = rel_state.to(self.device)
 
+        frame_offsets = batch.get("frame_offsets")
+        if frame_offsets is not None:
+            frame_offsets = frame_offsets.to(self.device)
+
         return {
+            "frame_offsets": frame_offsets,
             "rgb": rgb,
             "hand_rgb": hand_rgb,
             "depth": depth,
@@ -474,6 +511,7 @@ class BaseTrainer(pl.LightningModule):
             rel_state=inputs["rel_state"],
             depth=inputs["depth"],
             data_source=inputs["data_source"],
+            frame_offsets=inputs.get("frame_offsets"),
             mode=mode,
         )
 

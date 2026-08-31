@@ -120,7 +120,32 @@ class RoboVLMBackbone(nn.Module):
             self.token_repeat = 1
             self.latent_num = int(self.act_head_configs.get("latent", 1)) if self.act_head_configs else 1
             self.action_token = nn.Parameter(torch.zeros(self.hidden_size))
-        self.action_token.requires_grad_(True)
+
+        # OPT-IN cleanup (default off, so existing checkpoints keep their
+        # structure and Lightning's strict auto-resume keeps working):
+        # down_sample heads (GR00T / SmolVLA) build their own action tokens
+        # from the noised chunk and never insert this one into the sequence,
+        # so for them it is a registered parameter that never receives a
+        # gradient. Set act_head.drop_unused_action_token=true on NEW runs to
+        # omit it, which also removes the need for DDP find_unused_parameters.
+        ah = self.act_head_configs or {}
+        if (ah.get("drop_unused_action_token", False)
+                and ah.get("action_space", "continuous") == "down_sample"):
+            self.action_token = None
+            self._main_rank_print_safe(
+                "[backbone] action_token omitted (down_sample head)")
+        else:
+            self.action_token.requires_grad_(True)
+
+        # Temporal tags for history_type="pre": every frame's visual tokens get
+        # a sinusoidal encoding of (distance-to-current, distance-to-next-kept)
+        # so irregular history strides are legible. Zero-init => no-op at start.
+        self.frame_offset_embed = None
+        if (self.act_head_configs
+                and self.act_head_configs.get("history_type", "post") == "pre"
+                and self.act_head_configs.get("frame_offset_tags", True)):
+            from models.robo_lfm import FrameOffsetEmbedding
+            self.frame_offset_embed = FrameOffsetEmbedding(self.hidden_size)
 
         # Learnable depth-prediction queries (parallel to action_token). Used by
         # HierarchicalFCDecoder; not the CNN/QFormer depth conditioner.
@@ -335,6 +360,15 @@ class RoboVLMBackbone(nn.Module):
             insert_mask,
         )
     
+    @staticmethod
+    def _main_rank_print_safe(msg: str) -> None:
+        try:
+            from utils.dist_train import get_rank
+            if get_rank() == 0:
+                print(msg, flush=True)
+        except Exception:
+            pass
+
     def _expand_action_tokens(self, batch_size: int) -> torch.Tensor:
         """Insert action queries: legacy repeat for LIBERO/CALVIN, HE helper otherwise."""
         if self._use_he_action_layout:
