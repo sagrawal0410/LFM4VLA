@@ -165,6 +165,30 @@ def next_path_dir(sim, state, goal, min_m: float = 0.4):
     return (float(-lp[2]), float(-lp[0]))       # habitat local: fwd=-z, left=-x
 
 
+def advance_plan(wps, action: str, forward_m: float, turn_rad: float):
+    """Re-express a predicted plan in the robot's NEW ego frame after one action.
+
+    Waypoints are relative to the pose they were predicted from, so executing
+    several of them open-loop requires transforming the remainder by the motion
+    just made -- otherwise the plan goes stale and the controller steers at
+    where the target USED to be.
+
+    forward d : x -= d
+    turn by t : rotate positions by -t (CCW positive), yaw -= t
+    """
+    w = np.array(wps, dtype=np.float32, copy=True)
+    if action == "move_forward":
+        w[:, 0] -= forward_m
+        return w
+    t = turn_rad if action == "turn_left" else -turn_rad
+    c, s_ = math.cos(t), math.sin(t)
+    x, y = w[:, 0].copy(), w[:, 1].copy()
+    w[:, 0] = x * c + y * s_          # rotate by -t
+    w[:, 1] = -x * s_ + y * c
+    w[:, 2] -= t
+    return w
+
+
 def agent_yaw(sim) -> float:
     q = sim.get_agent(0).get_state().rotation
     # habitat yaw about +Y; forward is -Z at yaw 0
@@ -192,7 +216,15 @@ class WaypointController:
         self.lookahead = lookahead_m
         self.stop_radius = stop_radius
 
-    def act(self, waypoints: np.ndarray) -> str:
+    def act(self, waypoints: np.ndarray, fresh: bool = True) -> str:
+        """fresh=False when following a cached plan mid-cycle.
+
+        The stop test is only meaningful on a NEWLY predicted plan ("from what
+        I see now, I predict no motion"). While executing a cached plan the
+        remaining waypoints shrink toward the robot by construction -- each
+        move_forward subtracts 0.25 m -- so an 8-waypoint (~2 m) plan drops
+        inside stop_radius after ~5 steps and would fire a false "arrived".
+        """
         w = np.asarray(waypoints, dtype=np.float32)
         trans = float(np.linalg.norm(w[-1, :2]))
         yaw8 = float(w[-1, 2])
@@ -201,7 +233,7 @@ class WaypointController:
         # cannot distinguish "arrived" from "rotate first". Stop only when the
         # plan is at rest in BOTH position and heading; execute the predicted
         # yaw when the plan is rotation-dominant.
-        if trans < self.stop_radius and abs(yaw8) < math.radians(12.0):
+        if fresh and trans < self.stop_radius and abs(yaw8) < math.radians(12.0):
             return "stop"
         if trans < self.lookahead and abs(yaw8) >= self.turn_rad / 2.0:
             return "turn_left" if yaw8 > 0 else "turn_right"

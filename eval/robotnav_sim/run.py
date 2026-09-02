@@ -201,6 +201,8 @@ def rollout(sim, client, ep, args, recorder):
     ref_dense = core.densify_path(ref) if ref and len(ref) > 1 else None
     import random as _random
     hist_rng = _random.Random(hash(ep["id"]) % (2 ** 31))
+    plan, plan_used = None, 0
+    turn_rad = math.radians(ep["turn_deg"])
     from PIL import Image
     frames_hist = []
     positions = [list(ep["start_pos"])]
@@ -217,11 +219,19 @@ def rollout(sim, client, ep, args, recorder):
         if step % 20 == 0:
             print(f"[hist] mode={args.history_mode} step={step} idx={hidx}",
                   flush=True)
-        t0 = time.time()
-        wps = client.predict(ep["instruction"], sel, ep["family"],
-                             frame_ids=hidx)
-        dt = time.time() - t0
-        action = ctrl.act(wps)
+        # Replan every `replan_every` actions. In between, the cached plan is
+        # re-expressed in the robot's new frame after each executed action, so
+        # waypoints 2..k are actually followed instead of discarded. k=1 is the
+        # original behaviour (a fresh forward pass per action).
+        dt = 0.0
+        if plan is None or plan_used >= args.replan_every:
+            t0 = time.time()
+            plan = client.predict(ep["instruction"], sel, ep["family"],
+                                  frame_ids=hidx)
+            dt = time.time() - t0
+            plan_used = 0
+        wps = plan
+        action = ctrl.act(wps, fresh=(plan_used == 0))
         st = sim.get_agent(0).get_state()
         d_goal = core.geodesic(sim, st.position, ep["goal"])
         # goal in the robot's ego frame (habitat local: fwd=-z, left=-x)
@@ -244,6 +254,8 @@ def rollout(sim, client, ep, args, recorder):
         if action == "stop":
             break
         sim.step(action)
+        plan = core.advance_plan(plan, action, 0.25, turn_rad)
+        plan_used += 1
         positions.append(list(sim.get_agent(0).get_state().position))
     m = core.episode_metrics(sim, ep["goal"], positions, start_geo,
                              ep["success_dist"])
@@ -275,6 +287,9 @@ def main():
                     help="recency mode: >1 skews toward recent frames")
     ap.add_argument("--history-jitter", action="store_true",
                     help="recency mode: randomize the older slots")
+    ap.add_argument("--replan-every", type=int, default=1,
+                    help="actions executed per policy forward pass (1 = replan "
+                         "every step; 5 = follow 5 waypoints then re-observe)")
     ap.add_argument("--max-instr", type=int, default=130,
                     help="easy mode: max instruction length in characters "
                          "(RxR needs ~450; R2R fits in 130)")
