@@ -69,18 +69,18 @@ def load_pool(which: str, split: str) -> list[dict]:
     return pool
 
 
-def score(p: dict) -> dict | None:
+def score(p: dict, G) -> dict | None:
     """Geometric + linguistic easiness. Returns None if it fails a hard gate."""
     v = np.asarray(p["goal"], dtype=float) - np.asarray(p["start_pos"], dtype=float)
     dy = abs(float(v[1]))
-    if dy > 0.5:                                   # hard gate: same floor
+    if dy > G.max_dy:                              # hard gate: same floor
         return None
     dist = math.hypot(float(v[0]), float(v[2]))
-    if not (2.0 <= dist <= 6.0):                   # hard gate: close, not trivial
+    if not (G.dist_min <= dist <= G.dist_max):     # hard gate: close, not trivial
         return None
     lv = _rotate_by_conj(p["start_rot"], v)         # goal in the robot's frame
     bearing = abs(math.degrees(math.atan2(float(-lv[0]), float(-lv[2]))))
-    if bearing > 30.0:                             # hard gate: already in view
+    if bearing > G.max_bearing:                    # hard gate: already in view
         return None
 
     # Path straightness: reference path length vs straight-line distance.
@@ -91,12 +91,12 @@ def score(p: dict) -> dict | None:
         detour = plen / max(dist, 1e-6)
     else:
         plen, detour = dist, 1.0
-    if detour > 1.35:                              # hard gate: no doubling back
+    if detour > G.max_detour:                      # hard gate: no doubling back
         return None
 
     instr = p["instruction"]
     n_char = len(instr)
-    if n_char > 110:                               # hard gate: one short sentence
+    if n_char > G.max_chars:                       # hard gate: one short sentence
         return None
     n_clause = instr.count(",") + len(re.findall(r"\band\b", instr, re.I))
     n_vague = len(VAGUE.findall(instr))
@@ -104,8 +104,9 @@ def score(p: dict) -> dict | None:
     # Lower is easier. Weights chosen so a hard gate failure dominates any
     # single soft term, and bearing/detour (the things that actually strand the
     # controller) outweigh raw sentence length.
-    s = (bearing / 30.0 * 2.0 + (detour - 1.0) / 0.35 * 2.0
-         + n_char / 110.0 * 1.0 + n_clause * 0.6 + n_vague * 1.0
+    s = (bearing / max(G.max_bearing, 1e-6) * 2.0
+         + (detour - 1.0) / max(G.max_detour - 1.0, 1e-6) * 2.0
+         + n_char / max(G.max_chars, 1) * 1.0 + n_clause * 0.6 + n_vague * 1.0
          + abs(dist - 3.5) / 2.5 * 0.5)
     return {**p, "dist": dist, "dy": dy, "bearing": bearing, "detour": detour,
             "path_len": plen, "n_char": n_char, "n_clause": n_clause,
@@ -119,6 +120,14 @@ def main() -> None:
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--per-scene", type=int, default=2,
                     help="cap per scene so the set is not one building")
+    ap.add_argument("--max-bearing", type=float, default=30.0,
+                    help="deg off-centre the goal may start at")
+    ap.add_argument("--max-detour", type=float, default=1.35,
+                    help="reference-path length / straight-line distance")
+    ap.add_argument("--max-chars", type=int, default=110)
+    ap.add_argument("--max-dy", type=float, default=0.5)
+    ap.add_argument("--dist-min", type=float, default=2.0)
+    ap.add_argument("--dist-max", type=float, default=6.0)
     ap.add_argument("--emit-ep-ids", action="store_true",
                     help="print a comma-separated EP_IDS string and nothing else")
     args = ap.parse_args()
@@ -133,7 +142,7 @@ def main() -> None:
         if p["scene"] in train:          # verified held-out, not assumed
             leaked += 1
             continue
-        s = score(p)
+        s = score(p, args)
         if s:
             scored.append(s)
     scored.sort(key=lambda d: d["score"])
@@ -153,8 +162,9 @@ def main() -> None:
 
     print(f"pool={len(pool)}  excluded_as_seen={leaked}  "
           f"passed_gates={len(scored)}  showing={len(picked)}")
-    print("gates: same floor (dy<=0.5m) | 2-6m | bearing<=30deg | detour<=1.35 | "
-          "instr<=110 chars\n")
+    print(f"gates: dy<={args.max_dy}m | {args.dist_min}-{args.dist_max}m | "
+          f"bearing<={args.max_bearing}deg | detour<={args.max_detour} | "
+          f"instr<={args.max_chars} chars\n")
     hdr = (f"{'#':>2} {'ep':>6} {'scene':<12} {'dist':>5} {'bear':>5} "
            f"{'detour':>6} {'chars':>5} {'cl':>2} {'vg':>2} {'score':>5}  instruction")
     print(hdr); print("-" * len(hdr))
