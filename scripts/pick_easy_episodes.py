@@ -20,7 +20,6 @@ import re
 from pathlib import Path
 
 import numpy as np
-import quaternion as qt
 
 from eval.robotnav_sim import core
 
@@ -29,6 +28,18 @@ TRAIN_SCENES = "/tmp/train_scenes.txt"
 # ground; each occurrence costs a point.
 VAGUE = re.compile(r"\b(then|after|once|until|around|past|through|toward|towards|"
                    r"continue|second|third|other side|all the way|back)\b", re.I)
+
+
+def _rotate_by_conj(rot_xyzw, v: np.ndarray) -> np.ndarray:
+    """Rotate v by the conjugate of quaternion [x, y, z, w].
+
+    Inlined rather than pulling in `quaternion`, which only exists in the
+    habitat env -- this way the picker runs from any interpreter.
+    """
+    x, y, z, w = (float(c) for c in rot_xyzw)
+    u = np.array([-x, -y, -z])                     # conjugate
+    uv = np.cross(u, v)
+    return v + 2.0 * w * uv + 2.0 * np.cross(u, uv)
 
 
 def load_pool(which: str, split: str) -> list[dict]:
@@ -67,9 +78,7 @@ def score(p: dict) -> dict | None:
     dist = math.hypot(float(v[0]), float(v[2]))
     if not (2.0 <= dist <= 6.0):                   # hard gate: close, not trivial
         return None
-    r = p["start_rot"]                             # [x, y, z, w]
-    q = np.quaternion(r[3], r[0], r[1], r[2])
-    lv = qt.rotate_vectors(q.conjugate(), v)
+    lv = _rotate_by_conj(p["start_rot"], v)         # goal in the robot's frame
     bearing = abs(math.degrees(math.atan2(float(-lv[0]), float(-lv[2]))))
     if bearing > 30.0:                             # hard gate: already in view
         return None
