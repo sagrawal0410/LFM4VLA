@@ -211,13 +211,18 @@ class WaypointController:
     """
 
     def __init__(self, turn_deg: float, lookahead_m: float = 0.30,
-                 stop_radius: float = 0.50):
+                 stop_radius: float = 0.50, min_steps_before_stop: int = 7):
         self.turn_rad = math.radians(turn_deg)
         self.lookahead = lookahead_m
         self.stop_radius = stop_radius
+        self.min_steps_before_stop = min_steps_before_stop
 
-    def act(self, waypoints: np.ndarray, fresh: bool = True) -> str:
+    def act(self, waypoints: np.ndarray, fresh: bool = True,
+            step: int = 1 << 30) -> str:
         """fresh=False when following a cached plan mid-cycle.
+
+        `step` is the episode step index; the stop test is suppressed for the
+        first min_steps_before_stop steps.
 
         The stop test is only meaningful on a NEWLY predicted plan ("from what
         I see now, I predict no motion"). While executing a cached plan the
@@ -233,7 +238,14 @@ class WaypointController:
         # cannot distinguish "arrived" from "rotate first". Stop only when the
         # plan is at rest in BOTH position and heading; execute the predicted
         # yaw when the plan is rotation-dominant.
-        if fresh and trans < self.stop_radius and abs(yaw8) < math.radians(12.0):
+        # Suppress the stop test at the very start of an episode. At
+        # replan_every=1 the test runs against a fresh plan on step 0, so a
+        # single under-confident prediction inside stop_radius ends the episode
+        # before the robot moves at all (path_len 0.0, steps 1). Real arrivals
+        # cannot occur in the first few steps from a valid start pose.
+        if (fresh and step >= self.min_steps_before_stop
+                and trans < self.stop_radius
+                and abs(yaw8) < math.radians(12.0)):
             return "stop"
         if trans < self.lookahead and abs(yaw8) >= self.turn_rad / 2.0:
             return "turn_left" if yaw8 > 0 else "turn_right"

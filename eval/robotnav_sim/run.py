@@ -231,7 +231,7 @@ def rollout(sim, client, ep, args, recorder):
             dt = time.time() - t0
             plan_used = 0
         wps = plan
-        action = ctrl.act(wps, fresh=(plan_used == 0))
+        action = ctrl.act(wps, fresh=(plan_used == 0), step=step)
         st = sim.get_agent(0).get_state()
         d_goal = core.geodesic(sim, st.position, ep["goal"])
         # goal in the robot's ego frame (habitat local: fwd=-z, left=-x)
