@@ -142,6 +142,7 @@ def load_objectnav(which: str, split: str, limit: int):
                 "start_pos": e["start_position"], "start_rot": e["start_rotation"],
                 "goal": goals[0] if goals else None, "goals": goals,
                 "instruction": f"Find the {cat} and stop next to it.",
+                "cat": cat,
                 "success_dist": 1.0,
                 "family": which, "turn_deg": 30.0,
             })
@@ -291,7 +292,8 @@ def main():
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--episodes", type=int, default=10)
     ap.add_argument("--episode-ids", default="",
-                    # "<scene>:<id>" disambiguates ObjectNav; bare ids work for VLN
+                    # ObjectNav needs "<scene>:<category>:<id>" (ids restart per
+                    # category within a scene); bare ids work for VLN
                     help="comma-separated episode ids to run (overrides "
                          "round-robin selection)")
     ap.add_argument("--easy", action="store_true",
@@ -329,7 +331,9 @@ def main():
         # scene-qualified form "<scene>:<id>" and keep bare ids for VLN, whose
         # ids are unique across the split.
         eps = [e for e in pool
-               if e["id"] in want or f'{e["scene"]}:{e["id"]}' in want]
+               if e["id"] in want
+               or f'{e["scene"]}:{e["id"]}' in want
+               or f'{e["scene"]}:{e.get("cat")}:{e["id"]}' in want]
     elif args.suite.startswith("vlnce"):
         eps = load_vlnce(args.suite, args.split, args.episodes, easy=args.easy,
                          max_instr=args.max_instr)

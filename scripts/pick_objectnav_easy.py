@@ -166,7 +166,7 @@ def main() -> None:
             break
 
     if args.emit_ep_ids:
-        print(",".join(f'{c["scene"]}:{c["id"]}' for c in picked))
+        print(",".join(f'{c["scene"]}:{c["cat"]}:{c["id"]}' for c in picked))
         return
 
     print(f"episodes={len(eps)} excluded_as_seen={leaked} "
