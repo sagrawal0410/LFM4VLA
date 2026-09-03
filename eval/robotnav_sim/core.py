@@ -121,6 +121,40 @@ def geodesic(sim, a, b) -> float:
     return float(p.geodesic_distance)
 
 
+
+def as_goals(goal) -> list:
+    """Normalise a goal spec to a list of positions.
+
+    VLN episodes have one goal; ObjectNav episodes have every instance of the
+    target category and reaching ANY of them is success.
+    """
+    if goal is None:
+        return []
+    first = goal[0] if len(goal) else None
+    return list(goal) if isinstance(first, (list, tuple, np.ndarray)) else [goal]
+
+
+def geodesic_min(sim, a, goals):
+    """Shortest geodesic from a to the nearest goal instance."""
+    best = float("inf")
+    for g in as_goals(goals):
+        d = geodesic(sim, a, g)
+        if math.isfinite(d) and d < best:
+            best = d
+    return best
+
+
+def nearest_goal(sim, a, goals):
+    """The goal instance with the shortest geodesic from a (for HUD/overlays)."""
+    gs = as_goals(goals)
+    if not gs:
+        return None
+    if len(gs) == 1:
+        return gs[0]
+    return min(gs, key=lambda g: (lambda d: d if math.isfinite(d) else 1e9)(
+        geodesic(sim, a, g)))
+
+
 def densify_path(points, step_m: float = 0.5):
     """Interpolate a sparse world-space path so overlays draw smoothly."""
     pts = [np.asarray(p, dtype=np.float32) for p in points]
@@ -265,14 +299,21 @@ class WaypointController:
 # --------------------------------------------------------------- metrics ---
 def episode_metrics(sim, goal_pos, path_positions, start_geo: float,
                     success_dist: float):
-    """NE / SR / OS / SPL from a rollout's position trace."""
-    ne = geodesic(sim, path_positions[-1], goal_pos)
+    """NE / SR / OS / SPL from a rollout's position trace.
+
+    ``goal_pos`` may be one position or many. ObjectNav episodes list every
+    instance of the target category and reaching any one of them counts, so
+    distances are taken to the NEAREST instance rather than the first.
+    """
+    goals = as_goals(goal_pos)
+    ne = geodesic_min(sim, path_positions[-1], goals)
     if not math.isfinite(ne):
-        ne = float(np.linalg.norm(np.asarray(path_positions[-1]) - np.asarray(goal_pos)))
+        ne = min(float(np.linalg.norm(np.asarray(path_positions[-1]) - np.asarray(g)))
+                 for g in goals)
     sr = float(ne <= success_dist)
     dists = []
     for p in path_positions[:: max(1, len(path_positions) // 50)]:
-        d = geodesic(sim, p, goal_pos)
+        d = geodesic_min(sim, p, goals)
         if math.isfinite(d):
             dists.append(d)
     os_ = float(min(dists) <= success_dist) if dists else 0.0

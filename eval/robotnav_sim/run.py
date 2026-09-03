@@ -112,6 +112,10 @@ def load_objectnav(which: str, split: str, limit: int):
     out = []
     for f in cands:
         data = json.loads(gzip.open(f, "rt").read())
+        # MP3D ObjectNav v1 leaves episode["goals"] empty and stores the target
+        # instances once per scene under goals_by_category, keyed
+        # "<scene>.glb_<category>". Without this the episodes load with no goal.
+        by_cat = data.get("goals_by_category") or {}
         for e in data.get("episodes", []):
             sid = e["scene_id"]
             scene = sid.split("/")[-1].replace(".basis.glb", "").replace(".glb", "")
@@ -123,6 +127,12 @@ def load_objectnav(which: str, split: str, limit: int):
                 glb = core.mp3d_glb(scene)
             cat = e.get("object_category", "object")
             goals = [g["position"] for g in e.get("goals", [])] or None
+            if not goals:
+                key = f"{scene}.glb_{cat}"
+                inst = by_cat.get(key) or by_cat.get(f"{sid.split('/')[-1]}_{cat}")
+                goals = [g["position"] for g in inst] if inst else None
+            if not goals:
+                continue          # unresolvable target: skip rather than crash
             out.append({
                 "id": str(e["episode_id"]), "scene_glb": glb, "scene": scene,
                 "start_pos": e["start_position"], "start_rot": e["start_rotation"],
@@ -196,7 +206,8 @@ def rollout(sim, client, ep, args, recorder):
     q = np.quaternion(rot[3], rot[0], rot[1], rot[2])
     core.set_agent(sim, ep["start_pos"], q)
     ctrl = core.WaypointController(turn_deg=ep["turn_deg"])
-    start_geo = core.geodesic(sim, ep["start_pos"], ep["goal"])
+    goals = ep.get("goals") or [ep["goal"]]
+    start_geo = core.geodesic_min(sim, ep["start_pos"], goals)
     ref = ep.get("ref_path")
     ref_dense = core.densify_path(ref) if ref and len(ref) > 1 else None
     import random as _random
@@ -233,11 +244,12 @@ def rollout(sim, client, ep, args, recorder):
         wps = plan
         action = ctrl.act(wps, fresh=(plan_used == 0), step=step)
         st = sim.get_agent(0).get_state()
-        d_goal = core.geodesic(sim, st.position, ep["goal"])
+        d_goal = core.geodesic_min(sim, st.position, goals)
+        near_goal = core.nearest_goal(sim, st.position, goals)
         # goal in the robot's ego frame (habitat local: fwd=-z, left=-x)
         gl = quaternion.rotate_vectors(
             st.rotation.conjugate(),
-            np.asarray(ep["goal"]) - np.asarray(st.position))
+            np.asarray(near_goal) - np.asarray(st.position))
         import textwrap
         recorder.add(rgb, [
             f"{ep['family']} ep{ep['id']} step {step} act={action} ({dt:.1f}s)",
@@ -248,7 +260,7 @@ def rollout(sim, client, ep, args, recorder):
             "goal_ego": (float(-gl[2]), float(-gl[0])),
             "gt_path": (core.path_to_ego(ref_dense, st)
                         if ref_dense is not None else None),
-            "path_ego": core.next_path_dir(sim, st, ep["goal"]),
+            "path_ego": core.next_path_dir(sim, st, near_goal),
             "lookahead": ctrl.lookahead, "stop_radius": ctrl.stop_radius,
         })
         if action == "stop":
@@ -257,7 +269,7 @@ def rollout(sim, client, ep, args, recorder):
         plan = core.advance_plan(plan, action, 0.25, turn_rad)
         plan_used += 1
         positions.append(list(sim.get_agent(0).get_state().position))
-    m = core.episode_metrics(sim, ep["goal"], positions, start_geo,
+    m = core.episode_metrics(sim, goals, positions, start_geo,
                              ep["success_dist"])
     m.update({"episode": ep["id"], "scene": ep["scene"], "steps": len(positions),
               "stopped": action == "stop"})
