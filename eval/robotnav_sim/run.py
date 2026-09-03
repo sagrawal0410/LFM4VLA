@@ -104,7 +104,11 @@ def load_vlnce(which: str, split: str, limit: int, easy: bool = False,
 
 def load_objectnav(which: str, split: str, limit: int):
     root = Path(core.PATHS[which])
-    cands = sorted(root.glob(f"**/{split}/{split}.json.gz")) or \
+    # Per-scene content shards hold the episodes; the split-root <split>.json.gz
+    # is a stub with an empty episode list (and no goals_by_category), so it
+    # must not win the lookup or the suite loads zero episodes.
+    cands = sorted(root.glob(f"**/{split}/content/*.json.gz")) or \
+        sorted(root.glob(f"**/{split}/{split}.json.gz")) or \
         sorted(root.glob(f"**/{split}*.json.gz"))
     if not cands:
         raise FileNotFoundError(
