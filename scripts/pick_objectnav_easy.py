@@ -166,7 +166,7 @@ def main() -> None:
             break
 
     if args.emit_ep_ids:
-        print(",".join(c["id"] for c in picked))
+        print(",".join(f'{c["scene"]}:{c["id"]}' for c in picked))
         return
 
     print(f"episodes={len(eps)} excluded_as_seen={leaked} "
@@ -175,7 +175,7 @@ def main() -> None:
     print(f"gates: dy<={args.max_dy} | {args.dist_min}-{args.dist_max}m | "
           f"bearing<={args.max_bearing}deg | detour<={args.max_detour} | "
           f"{'clear categories only' if args.clear_only else 'any category'} | "
-          f"{'ray-verified visible' if not args.no_sim else 'NOT verified'}\n")
+          f"{'depth-verified visible' if not args.no_sim else 'NOT verified'}\n")
     hdr = (f"{'#':>2} {'ep':>7} {'scene':<12} {'category':<16} {'geo':>5} "
            f"{'bear':>5} {'detour':>6} {'vis':>4} {'score':>5}")
     print(hdr); print("-" * len(hdr))

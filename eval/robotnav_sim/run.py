@@ -287,6 +287,7 @@ def main():
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--episodes", type=int, default=10)
     ap.add_argument("--episode-ids", default="",
+                    # "<scene>:<id>" disambiguates ObjectNav; bare ids work for VLN
                     help="comma-separated episode ids to run (overrides "
                          "round-robin selection)")
     ap.add_argument("--easy", action="store_true",
@@ -319,7 +320,12 @@ def main():
         pool = (load_vlnce(args.suite, args.split, big)
                 if args.suite.startswith("vlnce")
                 else load_objectnav(args.suite, args.split, big))
-        eps = [e for e in pool if e["id"] in want]
+        # ObjectNav ids restart per scene -- "2" exists in most of the 11 val
+        # scenes, so a bare id selects hundreds of episodes. Accept the
+        # scene-qualified form "<scene>:<id>" and keep bare ids for VLN, whose
+        # ids are unique across the split.
+        eps = [e for e in pool
+               if e["id"] in want or f'{e["scene"]}:{e["id"]}' in want]
     elif args.suite.startswith("vlnce"):
         eps = load_vlnce(args.suite, args.split, args.episodes, easy=args.easy,
                          max_instr=args.max_instr)
