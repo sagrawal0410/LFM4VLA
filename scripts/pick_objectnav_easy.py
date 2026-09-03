@@ -132,7 +132,7 @@ def main() -> None:
             glb = core.mp3d_glb(scene)
             if not os.path.exists(glb):
                 continue
-            sim = core.make_eval_sim(glb, turn_deg=30.0)
+            sim, res, hfov = make_depth_sim(glb)
             try:
                 for c in group:
                     geo = core.geodesic(sim, c["start_pos"], c["goal"])
@@ -141,9 +141,11 @@ def main() -> None:
                     detour = geo / max(c["dist"], 1e-6)
                     if detour > args.max_detour:
                         continue
-                    vis = ray_visible(sim, c["start_pos"], c["goal"])
+                    vis, meas = depth_visible(sim, res, hfov,
+                                              c["start_pos"], c["start_rot"],
+                                              c["goal"])
                     verified.append({**c, "geo": geo, "detour": detour,
-                                     "visible": vis})
+                                     "visible": vis, "depth": meas})
             finally:
                 sim.close()
         verified = [v for v in verified if v["visible"]]
@@ -183,28 +185,68 @@ def main() -> None:
               f"{str(c['visible']):>4} {c['score']:>5.2f}")
 
 
-def ray_visible(sim, eye, target, cam_height: float = 1.0) -> bool:
-    """True when nothing blocks the camera's line of sight to the target.
+def make_depth_sim(scene_glb: str, height: float = 1.0, hfov: float = 105.0,
+                   resolution=(400, 640)):
+    """Same camera geometry as the eval sim, plus a depth sensor.
 
-    Cast from the camera toward the target and compare the first hit against
-    the target range: a hit meaningfully short of it means a wall or furniture
-    is in the way, so the object is not actually on screen at step 0.
+    Kept local to the picker so the eval's own sim construction is untouched.
     """
     import habitat_sim
-    o = np.asarray(eye, dtype=np.float32).copy()
-    o[1] += cam_height
-    t = np.asarray(target, dtype=np.float32).copy()
-    t[1] += 0.3                                   # aim at the body, not the floor
-    d = t - o
-    rng = float(np.linalg.norm(d))
-    if rng < 1e-6:
-        return True
-    ray = habitat_sim.geo.Ray(o, d / rng)
-    hits = sim.cast_ray(ray, max_distance=rng * 1.05)
-    if not hits.has_hits():
-        return True                                # clear all the way through
-    first = min(h.ray_distance for h in hits.hits) * rng
-    return first >= rng * 0.90                     # tolerate hitting the object
+    cfg = habitat_sim.SimulatorConfiguration()
+    cfg.scene_id = str(scene_glb)
+    cfg.enable_physics = False
+    cfg.gpu_device_id = -1
+    if os.environ.get("ROBOTNAV_GPU_DEVICE_ID", "auto") == "auto":
+        os.environ.setdefault("MAGNUM_DEVICE", str(core._egl_software_device_index()))
+    agent = habitat_sim.agent.AgentConfiguration()
+    d = habitat_sim.CameraSensorSpec()
+    d.uuid = "depth"
+    d.sensor_type = habitat_sim.SensorType.DEPTH
+    d.resolution = list(resolution)
+    d.position = [0.0, height, 0.0]
+    d.orientation = [0.0, 0.0, 0.0]
+    d.hfov = hfov
+    agent.sensor_specifications = [d]
+    return habitat_sim.Simulator(habitat_sim.Configuration(cfg, [agent])), resolution, hfov
+
+
+def depth_visible(sim, res, hfov, start_pos, start_rot, target,
+                  cam_height: float = 1.0, tol: float = 0.85):
+    """Is the target unoccluded at step 0?
+
+    Project the target into the depth image and compare the measured depth at
+    that pixel with the target's own range. Geometry alone cannot tell a target
+    in the open from one behind a wall; the depth buffer can. Bullet is not
+    installed here, so sim.cast_ray silently returns no hits -- this is the
+    substitute, and it needs no physics.
+    """
+    import quaternion as qt
+    H, W = int(res[0]), int(res[1])
+    q = np.quaternion(start_rot[3], start_rot[0], start_rot[1], start_rot[2])
+    eye = np.asarray(start_pos, dtype=float).copy()
+    eye[1] += cam_height
+    v = np.asarray(target, dtype=float) - eye
+    lv = qt.rotate_vectors(q.conjugate(), v)      # agent frame: -Z fwd, +X right
+    fwd = -float(lv[2])
+    if fwd <= 0.1:                                 # behind the camera
+        return False, None
+    fx = (W / 2.0) / math.tan(math.radians(hfov) / 2.0)
+    u = W / 2.0 + fx * (float(lv[0]) / fwd)
+    vpix = H / 2.0 - fx * (float(lv[1]) / fwd)
+    if not (0 <= u < W and 0 <= vpix < H):         # outside the frame
+        return False, None
+    core.set_agent(sim, start_pos, q)
+    dep = sim.get_sensor_observations()["depth"]
+    # median of a small patch: robust to a single stray pixel on an edge
+    r = 3
+    y0, y1 = max(0, int(vpix) - r), min(H, int(vpix) + r + 1)
+    x0, x1 = max(0, int(u) - r), min(W, int(u) + r + 1)
+    patch = np.asarray(dep[y0:y1, x0:x1], dtype=float)
+    patch = patch[np.isfinite(patch) & (patch > 0)]
+    if patch.size == 0:
+        return False, None
+    measured = float(np.median(patch))
+    return measured >= fwd * tol, measured
 
 
 if __name__ == "__main__":
