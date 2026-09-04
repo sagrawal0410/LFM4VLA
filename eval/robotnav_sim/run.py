@@ -339,6 +339,7 @@ def main():
                          max_instr=args.max_instr)
     else:
         eps = load_objectnav(args.suite, args.split, args.episodes)
+    unique_ids = len({e["id"] for e in eps}) == len(eps)
     print(f"[suite] {args.suite}/{args.split}: {len(eps)} episodes")
 
     client = core.PolicyClient(args.config, args.ckpt, device=args.policy_device)
@@ -360,7 +361,13 @@ def main():
                     print(f"[ep {ep['id']}] scene {ep['scene']} load FAILED: "
                           f"{e}", flush=True)
                     continue
-            rec = core.RolloutRecorder(str(out / f"ep{ep['id']}.mp4"))
+            # ObjectNav ids repeat across scenes and categories, so a bare
+            # "ep<id>.mp4" silently overwrites an earlier episode's video.
+            # Qualify the name whenever the pool is not uniquely keyed by id.
+            stem = f"ep{ep['id']}"
+            if not unique_ids:
+                stem = f"{ep['scene']}-{ep.get('cat', ep['family'])}-ep{ep['id']}"
+            rec = core.RolloutRecorder(str(out / f"{stem}.mp4"))
             try:
                 m = rollout(sim, client, ep, args, rec)
             except Exception as e:  # noqa: BLE001
