@@ -101,6 +101,7 @@ class RobotNavMixtureDataset(IterableDataset):
         norm_action: bool = True,          # accepted from common kwargs
         norm_min: float = -1.0,
         norm_max: float = 1.0,
+        supervise_terminal_holds: bool = False,
         **_ignored,
     ):
         super().__init__()
@@ -115,6 +116,9 @@ class RobotNavMixtureDataset(IterableDataset):
         # so a single batch blends ~85% trajectory and ~15% VL samples.
         self.mixture_mode = str(mixture_mode)
         assert self.mixture_mode in ("batch", "sample")
+        # Supervise the repeated tail of truncated chunks ("arrive, then hold")
+        # instead of masking it away -- the only stop signal the corpus carries.
+        self.supervise_terminal_holds = bool(supervise_terminal_holds)
         # Qwen-RobotNav per-sample observation randomization, single-view
         # variant (camera-view + per-camera-weight axes intentionally absent).
         # Axes: total visual token budget B ~ U[budget_min, budget_max];
@@ -312,9 +316,26 @@ class RobotNavMixtureDataset(IterableDataset):
             "rgb": rgb,                                   # [ws, C, H, W]
             "lang": self._instruction(family, row),
             "chunk": torch.from_numpy(w),                 # [K, 3] normalized
-            "chunk_mask": torch.tensor(row["terminal_mask"], dtype=torch.float32),
+            "chunk_mask": self._chunk_mask(row),
             "family": family,
         }
+
+    def _chunk_mask(self, row) -> torch.Tensor:
+        """Per-waypoint loss mask for one trajectory sample.
+
+        terminal_mask zeroes the tail of a truncated chunk. Those slots are not
+        junk: the corpus pads them by repeating the last real waypoint, i.e.
+        "arrive here, then hold" -- the only place the data expresses stopping.
+        Masking them means the model gets no gradient there and never learns to
+        end an episode, which is what drives OS >> SR at eval.
+
+        With supervise_terminal_holds the repeats are supervised like any other
+        waypoint, so a held plan becomes a learnable output.
+        """
+        m = torch.tensor(row["terminal_mask"], dtype=torch.float32)
+        if self.supervise_terminal_holds:
+            return torch.ones_like(m)
+        return m
 
     def _vl_sample(self) -> Dict[str, Any]:
         row = self.vl_stream.next()
