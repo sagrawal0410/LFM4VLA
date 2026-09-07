@@ -5,7 +5,7 @@
   "model": "lfm450m",
   "model_url": "https://huggingface.co/LiquidAI/LFM2.5-VL-450M",
   "seq_len": 1,
-  "window_size": 9,
+  "window_size": 1,
   "fwd_pred_next_n": 8,
   "arm_gripper_loss_ratio": 0.01,
   "cap_loss_ratio": 0.05,
