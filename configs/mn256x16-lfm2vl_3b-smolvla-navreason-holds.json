@@ -94,7 +94,7 @@
     "check_val_every_n_epoch": 1,
     "val_check_interval": 1250,
     "checkpoint_every_n_train_steps": 1000,
-    "max_steps": 40000,
+    "max_steps": 80000,
     "accumulate_grad_batches": 2,
     "devices": 8,
     "num_nodes": 2
