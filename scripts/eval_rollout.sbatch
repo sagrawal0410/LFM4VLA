@@ -8,6 +8,7 @@
 #SBATCH --output=/home/teams/research/robotics/logs/eval_rollout_%j.log
 # Closed-loop Habitat rollouts with videos (cluster: CPU render + CPU policy).
 # CONFIG=... CKPT=... SUITE=vlnce_r2r SPLIT=val_seen N_EP=3 OUT=... sbatch ...
+# STOP_RADIUS=1.5 fires the stop test earlier along the path.
 set -uo pipefail
 LFM4VLA_ROOT="${LFM4VLA_ROOT:-$HOME/LFM4VLA}"
 RND=/home/teams/research/robotics/robotnav_data
@@ -27,5 +28,5 @@ unshare -Urm bash -c "mount -t tmpfs none /dev/dri 2>/dev/null || true; \
     --policy-device cpu --max-steps ${MAX_STEPS:-200} \
     ${EP_IDS:+--episode-ids $EP_IDS} ${EASY:+--easy} \
     ${MAX_INSTR:+--max-instr $MAX_INSTR} \
-    ${HIST_MODE:+--history-mode $HIST_MODE} ${HIST_ALPHA:+--history-alpha $HIST_ALPHA} ${HIST_JITTER:+--history-jitter} ${REPLAN:+--replan-every $REPLAN}"
+    ${HIST_MODE:+--history-mode $HIST_MODE} ${HIST_ALPHA:+--history-alpha $HIST_ALPHA} ${HIST_JITTER:+--history-jitter} ${REPLAN:+--replan-every $REPLAN} ${STOP_RADIUS:+--stop-radius $STOP_RADIUS}"
 echo "EVAL_ROLLOUT_DONE out=$OUT"
