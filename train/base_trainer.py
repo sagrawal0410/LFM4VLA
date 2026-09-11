@@ -81,7 +81,6 @@ class BaseTrainer(pl.LightningModule):
         self.fwd_pred_hand = self.configs["train_setup"]["predict_forward_hand"]
         self.cap_pred = self.configs["train_setup"]["predict_caption"]
 
-    @classmethod
     def _init_lepig(self):
         """Build the LEPIG controller and (for plans B/C) the world branch."""
         from models.lepig.controller import LepigController
@@ -104,6 +103,7 @@ class BaseTrainer(pl.LightningModule):
                 **{k: v for k, v in wcfg.items() if k != "horizons_seconds"})
             self.lambda_world = float(cfg.get("lambda_world", 1.0))
 
+    @classmethod
     def from_checkpoint(cls, ckpt_path=None, ckpt_source="torch", configs=None):
         if ckpt_path is None:
             return cls(configs)
