@@ -137,6 +137,7 @@ class RobotNavMLPHead(BasePolicyHead):
         kwargs.pop("down_sample", None)
         super().__init__(hidden_size, action_dim, latent=latent, **kwargs)
         self.fwd_pred_next_n = fwd_pred_next_n
+        self.build_stop_head(in_features, fwd_pred_next_n)
         self.temporal = _TemporalReadout(
             in_features * latent,
             layers=int(kwargs.get("history_layers", 2)),
@@ -613,6 +614,7 @@ class SmolVLAFlowMatchingHead(BasePolicyHead):
         kwargs.pop("down_sample", None)
         super().__init__(hidden_size, action_dim, **kwargs)
         self.fwd_pred_next_n = fwd_pred_next_n
+        self.build_stop_head(in_features, fwd_pred_next_n)
         self.num_vlm_layers = num_vlm_layers
         self.num_inference_steps = num_inference_steps
 

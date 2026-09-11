@@ -599,6 +599,12 @@ class RoboVLMBackbone(nn.Module):
         head_out = self.act_head(
             action_tokens, actions=action_labels, action_masks=action_mask, **kwargs
         )
+        # Explicit stop channel: a per-slot logit computed from the same action
+        # tokens, kept separate from the waypoint regression so an uncertain
+        # plan does not read as "arrived".
+        stop_logits = None
+        if getattr(self.act_head, "use_stop_head", False):
+            stop_logits = self.act_head.stop_logits_from(action_tokens)
 
         depth_pred = None
         if isinstance(head_out, dict):
@@ -619,6 +625,9 @@ class RoboVLMBackbone(nn.Module):
             action_loss = self.act_head.loss(
                 action, action_labels, action_mask, **loss_kwargs
             )
+            sl = self.act_head.stop_loss(stop_logits, kwargs.get("stop_label"))
+            if sl is not None and isinstance(action_loss, dict):
+                action_loss["loss_stop"] = sl
 
         return action, action_loss, depth_pred
 

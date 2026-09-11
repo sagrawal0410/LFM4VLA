@@ -317,6 +317,12 @@ class RobotNavMixtureDataset(IterableDataset):
             "lang": self._instruction(family, row),
             "chunk": torch.from_numpy(w),                 # [K, 3] normalized
             "chunk_mask": self._chunk_mask(row),
+            # 1 where the slot is a padded terminal hold. Taken from the
+            # raw terminal_mask so it stays correct regardless of whether
+            # supervise_terminal_holds unmasked those slots for the
+            # waypoint loss.
+            "stop_label": 1.0 - torch.tensor(row["terminal_mask"],
+                                             dtype=torch.float32),
             "family": family,
         }
 
@@ -503,8 +509,11 @@ class RobotNavMixtureDataset(IterableDataset):
         masks = torch.stack([s["chunk_mask"] for s in samples])   # [B, K]
         action_chunck = torch.zeros(b, self.ws, K_WAYPOINTS, ACTION_DIM)
         chunck_mask = torch.zeros(b, self.ws, K_WAYPOINTS)
+        stops = torch.stack([s["stop_label"] for s in samples])   # [B, K]
+        stop_label = torch.zeros(b, self.ws, K_WAYPOINTS)
         action_chunck[:, -1] = chunks
         chunck_mask[:, -1] = masks
+        stop_label[:, -1] = stops
         texts = [s["lang"] for s in samples]
         # Per-sample denormalization vectors (frozen 99th-pct scale factors) so
         # the trainer can compute task-space metrics (ADE/FDE meters, yaw deg).
@@ -522,6 +531,7 @@ class RobotNavMixtureDataset(IterableDataset):
             "text_mask": None,
             "action_chunck": action_chunck,
             "chunck_mask": chunck_mask,
+            "stop_label": stop_label,
             "raw_text": texts,
             "frame_offsets": torch.stack(
                 [s["frame_offsets"] for s in samples]),      # [B, ws, 2]

@@ -94,7 +94,53 @@ class BasePolicyHead(torch.nn.Module):
         self.down_sample = down_sample
         self.latent = latent
         self.action_space = action_space
-    
+        # Optional explicit stop head: one logit per waypoint slot, trained with
+        # BCE against "this slot is a terminal hold". Keeps the stop decision on
+        # its own calibrated channel instead of inferring it from the geometry
+        # of a near-static waypoint plan, which cannot distinguish "arrived"
+        # from "uncertain" (both regress toward zero displacement).
+        self.use_stop_head = bool(kwargs.get("stop_head", False))
+        self.stop_pos_weight = float(kwargs.get("stop_pos_weight", 8.0))
+        self.stop_loss_weight = float(kwargs.get("stop_loss_weight", 1.0))
+        self.stop_head = None          # built by build_stop_head(in_dim)
+
+    def build_stop_head(self, in_features: int, n_slots: int = 8):
+        """Create the stop head once the true token feature dim is known.
+
+        Subclasses pass `hidden_size` (their own MLP width) to __init__, not the
+        backbone feature width, so the input dim must come from the caller.
+        """
+        if not self.use_stop_head:
+            return
+        d = int(in_features) * int(self.latent)
+        self.stop_head = torch.nn.Sequential(
+            torch.nn.LayerNorm(d),
+            torch.nn.Linear(d, int(n_slots)),
+        )
+
+    def stop_logits_from(self, tok_seq: torch.Tensor):
+        """[B, ws, n, d] -> [B, ws, K] stop logits, or None when disabled."""
+        if not self.use_stop_head or self.stop_head is None:
+            return None
+        b, w = tok_seq.shape[:2]
+        x = tok_seq.reshape(b, w, -1)
+        return self.stop_head(x)
+
+    def stop_loss(self, stop_logits, stop_label):
+        """BCE on the stop channel. stop_label [B, ws, K], 1 = should hold.
+
+        Terminal slots are ~5% of all slots, so pos_weight counteracts the
+        imbalance that would otherwise make "never stop" a good solution.
+        """
+        if stop_logits is None or stop_label is None:
+            return None
+        import torch.nn.functional as F
+        tgt = stop_label.to(stop_logits.dtype)
+        pw = torch.tensor(self.stop_pos_weight, device=stop_logits.device,
+                          dtype=stop_logits.dtype)
+        bce = F.binary_cross_entropy_with_logits(stop_logits, tgt, pos_weight=pw)
+        return self.stop_loss_weight * bce
+
     def _get_target_modes(self, output_hs, tok_mask):
         index = tok_mask.nonzero(as_tuple=True)
         return output_hs[index]

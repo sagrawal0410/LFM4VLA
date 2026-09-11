@@ -159,6 +159,8 @@ class BaseTrainer(pl.LightningModule):
         loss_cap = prediction.get("loss_cap")
         loss_kl = prediction.get("loss_kl")
         loss_vl_cotrain = prediction.get("loss_vl_cotrain")
+        # head returns loss_stop; _update_loss suffixes it with the modality
+        loss_stop = prediction.get("loss_stop_act") or prediction.get("loss_stop")
         clip_l1 = prediction.get("text_l1_clip")
 
         loss = prediction.get("loss")
@@ -190,9 +192,13 @@ class BaseTrainer(pl.LightningModule):
             loss = loss + self.cap_loss_ratio * loss_cap
         if loss_vl_cotrain is not None:
             loss = loss + self.vl_cotrain_ratio * loss_vl_cotrain
+        # Explicit stop channel; already scaled by stop_loss_weight in the head.
+        if loss_stop is not None:
+            loss = loss + loss_stop
 
         return {
             "loss": loss,
+            "loss_stop_act": loss_stop,
             "loss_act": loss_act,
             "loss_arm_act": loss_arm_act,
             "loss_gripper_act": loss_gripper_act,
@@ -473,6 +479,9 @@ class BaseTrainer(pl.LightningModule):
         chunck_mask = batch.get("chunck_mask")
         if chunck_mask is not None:
             chunck_mask = chunck_mask.to(self.device)
+        stop_label = batch.get("stop_label")
+        if stop_label is not None:
+            stop_label = stop_label.to(self.device)
 
         rel_state = batch.get("rel_state")
         if rel_state is not None:
@@ -493,6 +502,7 @@ class BaseTrainer(pl.LightningModule):
             "arm_action_chunck": arm_action_chunck,
             "gripper_action_chunck": gripper_action_chunck,
             "chunck_mask": chunck_mask,
+            "stop_label": stop_label,
             "raw_text": batch.get("raw_text"),
             "rel_state": rel_state,
             "data_source": batch.get("data_source", "calvin_action"),
@@ -506,6 +516,7 @@ class BaseTrainer(pl.LightningModule):
             attention_mask=inputs["text_mask"],
             action_labels=(inputs["arm_action_chunck"], inputs["gripper_action_chunck"]),
             action_mask=inputs["chunck_mask"],
+            stop_label=inputs.get("stop_label"),
             vision_gripper=inputs["hand_rgb"],
             raw_text=inputs["raw_text"],
             rel_state=inputs["rel_state"],
@@ -576,6 +587,8 @@ class BaseTrainer(pl.LightningModule):
                 attention_mask=inputs["text_mask"],
                 action_labels=(inputs["arm_action_chunck"], inputs["gripper_action_chunck"]),
                 action_mask=inputs["chunck_mask"],
+            stop_label=inputs.get("stop_label"),
+                stop_label=inputs.get("stop_label"),
                 vision_gripper=inputs["hand_rgb"],
                 raw_text=inputs["raw_text"],
                 rel_state=inputs["rel_state"],
