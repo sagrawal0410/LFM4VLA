@@ -17,6 +17,7 @@ class BaseTrainer(pl.LightningModule):
         self.configs = configs
         self.model_fn = getattr(RoboVLM_Backbone, configs["robovlm_name"])
         self._initialize()
+        self._init_lepig()
         self.save_hyperparameters()
 
         val_dataset = configs["val_dataset"]
@@ -81,6 +82,28 @@ class BaseTrainer(pl.LightningModule):
         self.cap_pred = self.configs["train_setup"]["predict_caption"]
 
     @classmethod
+    def _init_lepig(self):
+        """Build the LEPIG controller and (for plans B/C) the world branch."""
+        from models.lepig.controller import LepigController
+        cfg = self.configs.get("lepig") or {}
+        self.lepig = LepigController(cfg)
+        self.world_branch = None
+        self.vjepa = None
+        if not self.lepig.enabled:
+            return
+        if self.lepig.weights_the_world_loss or cfg.get("world_loss", False):
+            from models.lepig.world import WorldBranch
+            wcfg = cfg.get("world_branch", {}) or {}
+            in_features = int(cfg.get("backbone_hidden", 2048))
+            self.world_branch = WorldBranch(
+                in_features=in_features,
+                action_dim=int(self.configs.get("act_head", {}).get("action_dim", 3)),
+                action_conditioned=bool(cfg.get("action_conditioned", False)),
+                n_horizons=len(wcfg.get("horizons_seconds", [0.5, 1.0, 2.0])),
+                target_dim=int(cfg.get("target_dim", 1024)),
+                **{k: v for k, v in wcfg.items() if k != "horizons_seconds"})
+            self.lambda_world = float(cfg.get("lambda_world", 1.0))
+
     def from_checkpoint(cls, ckpt_path=None, ckpt_source="torch", configs=None):
         if ckpt_path is None:
             return cls(configs)

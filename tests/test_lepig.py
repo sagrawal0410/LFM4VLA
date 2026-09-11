@@ -182,3 +182,64 @@ if __name__ == "__main__":
     if FAIL:
         print("  FAILED:", ", ".join(FAIL)); raise SystemExit(1)
     print("  ALL CHECKS PASSED")
+
+
+# 9 ---- controller: plan semantics and weight gating ----------------------
+def test_controller_plan_semantics():
+    from models.lepig.controller import LepigController
+    expect = {"a1": (False, True), "a2": (False, True), "a3": (False, True),
+              "b": (True, False), "c": (True, True)}
+    ok = True
+    for plan, (wworld, route) in expect.items():
+        c = LepigController({"plan": plan})
+        good = (c.enabled and c.weights_the_world_loss == wworld
+                and c.routes_backbone_fm_grad == route)
+        ok &= good
+        if not good:
+            print(f"      plan {plan}: world={c.weights_the_world_loss} "
+                  f"route={c.routes_backbone_fm_grad} (want {wworld},{route})")
+    check("plan semantics: B weights world only, C also routes FM grad", ok)
+    off = LepigController({"plan": "none"})
+    check("unknown plan disables the controller", not off.enabled)
+
+
+def test_controller_gating():
+    from models.lepig.controller import LepigController
+    c = LepigController({"plan": "a2", "min_warmup_steps": 100, "refresh_steps": 50})
+    check("weights are all-ones before warmup",
+          bool(torch.allclose(c.weights(None, 8), torch.ones(8))))
+    check("not ready before warmup", not c.ready)
+    c.warm(200, 1000)
+    check("no refresh off-interval", not c.should_refresh(175))
+    check("refresh on interval", c.should_refresh(200))
+    check("regime labelled as curriculum, not acquisition",
+          c.regime_label() == "pig_inspired_curriculum")
+
+
+def test_snapshot_invalidation():
+    from models.lepig.controller import LepigController
+    c = LepigController({"plan": "a1", "min_warmup_steps": 0,
+                         "trajectory_snapshots": 5, "trajectory_window_steps": 20})
+    ps = [torch.nn.Parameter(torch.randn(10)) for _ in range(2)]
+    for step in range(0, 40, 5):
+        with torch.no_grad():
+            for p in ps:
+                p.add_(torch.randn_like(p) * 0.01)
+        c.on_step(step, ps)
+    c.warm(40, 100)
+    built = c.refresh()
+    sid = c.snapshot_id
+    c.add_anchor(torch.randn(4, c.subspace.effective_rank))
+    check("subspace builds from captured trajectory", built and c.ready,
+          f"rank={c.subspace.effective_rank}")
+    c.refresh()
+    check("refresh bumps snapshot id and clears anchors",
+          c.snapshot_id == sid + 1 and len(c.anchors) == 0)
+
+
+for _fn in (test_controller_plan_semantics, test_controller_gating,
+            test_snapshot_invalidation):
+    _fn()
+print(f"\n  controller checks: {len(OK)} passed, {len(FAIL)} failed")
+if FAIL:
+    raise SystemExit(1)
