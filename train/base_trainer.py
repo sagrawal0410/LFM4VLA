@@ -587,7 +587,6 @@ class BaseTrainer(pl.LightningModule):
                 attention_mask=inputs["text_mask"],
                 action_labels=(inputs["arm_action_chunck"], inputs["gripper_action_chunck"]),
                 action_mask=inputs["chunck_mask"],
-            stop_label=inputs.get("stop_label"),
                 stop_label=inputs.get("stop_label"),
                 vision_gripper=inputs["hand_rgb"],
                 raw_text=inputs["raw_text"],
