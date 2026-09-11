@@ -75,7 +75,40 @@ fi
 # Placement made explicit: without it srun can pack tasks unevenly, giving
 # some ranks SLURM_LOCALID >= devices-per-node (Lightning IndexError + the
 # remaining ranks hanging in rendezvous until timeout).
-srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks-per-node="$SLURM_NTASKS_PER_NODE" \
-  bash -c 'export MIOPEN_USER_DB_PATH="/tmp/${USER}-miopen-${SLURM_JOB_ID}-${SLURM_PROCID}"; \
-  export MIOPEN_CUSTOM_CACHE_DIR="$MIOPEN_USER_DB_PATH"; mkdir -p "$MIOPEN_USER_DB_PATH"; \
-  exec python main.py --config '"$CONFIG"' '"${RESUME_ARG[*]:-}"''
+# NCCL watchdog: the default 1800s collective timeout has killed six multi-day
+# runs mid-training (DistBackendError + "Watchdog caught", no Python traceback).
+# A slow-but-recovering collective should not cost a whole run.
+export TORCH_NCCL_TIMEOUT="${TORCH_NCCL_TIMEOUT:-5400}"
+export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
+export TORCH_NCCL_DESYNC_DEBUG="${TORCH_NCCL_DESYNC_DEBUG:-1}"
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
+
+# Auto-restart: on non-zero exit, resume from this run's own last.ckpt instead
+# of losing the run. Slurm --requeue does not cover this: the job exits
+# non-zero rather than being preempted.
+MAX_ATTEMPTS="${MAX_ATTEMPTS:-8}"
+attempt=1
+while : ; do
+  echo "[train_robotnav] attempt $attempt/$MAX_ATTEMPTS $(date -Is)"
+  set +e
+  srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks-per-node="$SLURM_NTASKS_PER_NODE" \
+    bash -c 'export MIOPEN_USER_DB_PATH="/tmp/${USER}-miopen-${SLURM_JOB_ID}-${SLURM_PROCID}"; \
+    export MIOPEN_CUSTOM_CACHE_DIR="$MIOPEN_USER_DB_PATH"; mkdir -p "$MIOPEN_USER_DB_PATH"; \
+    exec python main.py --config '"$CONFIG"' '"${RESUME_ARG[*]:-}"''
+  rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then echo "[train_robotnav] finished cleanly"; break; fi
+  attempt=$((attempt+1))
+  if [ "$attempt" -gt "$MAX_ATTEMPTS" ]; then
+    echo "[train_robotnav] exhausted $MAX_ATTEMPTS attempts (last rc=$rc)"
+    exit "$rc"
+  fi
+  LAST=$(ls -t "$OUT_ROOT"/*/"$TASK"-*sj"${SLURM_JOB_ID}"r*/last.ckpt 2>/dev/null | head -1 || true)
+  if [ -n "$LAST" ]; then
+    echo "[train_robotnav] rc=$rc -- auto-resuming from $LAST"
+    RESUME_ARG=(--resume "$LAST")
+  else
+    echo "[train_robotnav] rc=$rc -- no checkpoint yet, restarting clean"
+  fi
+  sleep 60
+done
