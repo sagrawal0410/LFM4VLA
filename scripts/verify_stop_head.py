@@ -50,7 +50,13 @@ def main():
     import types
     module._trainer = types.SimpleNamespace(
         world_size=1, global_rank=0, local_rank=0, num_devices=1,
-        global_step=0, current_epoch=0, max_steps=1, estimated_stepping_batches=1)
+        global_step=0, current_epoch=0, max_steps=1,
+        estimated_stepping_batches=1, barebones=False, loggers=[],
+        log_dir=None, state=None, sanity_checking=False)
+    # Metric logging walks deep into Lightning internals that a stand-in cannot
+    # satisfy; it is incidental to whether the stop head receives gradient.
+    module.log = lambda *a, **k: None
+    module.log_dict = lambda *a, **k: None
 
     head = module.model.act_head
     print(f"  use_stop_head          : {getattr(head, 'use_stop_head', None)}")
