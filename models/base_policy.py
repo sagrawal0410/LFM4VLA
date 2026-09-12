@@ -102,6 +102,13 @@ class BasePolicyHead(torch.nn.Module):
         self.use_stop_head = bool(kwargs.get("stop_head", False))
         self.stop_pos_weight = float(kwargs.get("stop_pos_weight", 8.0))
         self.stop_loss_weight = float(kwargs.get("stop_loss_weight", 1.0))
+        # Detached: the head trains at full speed but cannot perturb the shared
+        # backbone. The waypoint objective converges to ~0.007 while this BCE
+        # starts near 1.9, so a coupled head at weight 1.0 would drive backbone
+        # updates ~263:1 and put the navigation quality at risk. Detaching
+        # isolates "can a stop head decide when to stop" from "does adding one
+        # damage navigation".
+        self.stop_detach = bool(kwargs.get("stop_head_detach", True))
         self.stop_head = None          # built by build_stop_head(in_dim)
 
     def build_stop_head(self, in_features: int, n_slots: int = 8):
@@ -123,8 +130,8 @@ class BasePolicyHead(torch.nn.Module):
         if not self.use_stop_head or self.stop_head is None:
             return None
         b, w = tok_seq.shape[:2]
-        x = tok_seq.reshape(b, w, -1)
-        return self.stop_head(x)
+        x = tok_seq.detach() if self.stop_detach else tok_seq
+        return self.stop_head(x.reshape(b, w, -1))
 
     def stop_loss(self, stop_logits, stop_label):
         """BCE on the stop channel. stop_label [B, ws, K], 1 = should hold.

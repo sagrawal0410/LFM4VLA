@@ -92,6 +92,13 @@ def main():
     print(f"  stop keys in prediction: {keys}")
 
     loss.backward()
+    # With stop_head_detach the head must train while the backbone sees NO
+    # gradient from the stop path -- that is the whole point of detaching.
+    bb = [p for n, p in module.model.named_parameters()
+          if "act_head" not in n and p.grad is not None]
+    bb_norm = sum(float(p.grad.norm()) ** 2 for p in bb) ** 0.5
+    print(f"  detach flag            : {getattr(head, 'stop_detach', None)}")
+    print(f"  backbone grad norm     : {bb_norm:.6e}  ({len(bb)} tensors)")
     g = [(n, p.grad) for n, p in head.named_parameters() if "stop_head" in n]
     gn = sum(float(x.norm()) for _, x in g if x is not None)
     print(f"  stop_head grad norm    : {gn:.6e}")
