@@ -211,7 +211,9 @@ def rollout(sim, client, ep, args, recorder):
     q = np.quaternion(rot[3], rot[0], rot[1], rot[2])
     core.set_agent(sim, ep["start_pos"], q)
     ctrl = core.WaypointController(turn_deg=ep["turn_deg"],
-                                   stop_radius=args.stop_radius)
+                                   stop_radius=args.stop_radius,
+                                   stop_mode=args.stop_mode,
+                                   min_steps_before_stop=args.min_steps_before_stop)
     goals = ep.get("goals") or [ep["goal"]]
     start_geo = core.geodesic_min(sim, ep["start_pos"], goals)
     ref = ep.get("ref_path")
@@ -315,6 +317,15 @@ def main():
                          "(RxR needs ~450; R2R fits in 130)")
     ap.add_argument("--max-steps", type=int, default=150)
     ap.add_argument("--out", default="results/rollouts")
+    ap.add_argument("--stop-mode", default="geometric",
+                    choices=["geometric", "plan_static", "both"],
+                    help="geometric: controller decides from the last waypoint's "
+                         "distance. plan_static: the MODEL decides -- stop when "
+                         "it emits a plan that stops changing, which is what "
+                         "terminal-hold training teaches it to produce.")
+    ap.add_argument("--min-steps-before-stop", type=int, default=7,
+                    help="suppress the stop test for this many steps; 0 lets "
+                         "the model's own signal speak from step 0")
     ap.add_argument("--stop-radius", type=float, default=0.50,
                     # Fires the stop test while the model still predicts this
                     # much remaining travel. Raising it stops earlier along the

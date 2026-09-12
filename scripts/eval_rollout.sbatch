@@ -28,5 +28,5 @@ unshare -Urm bash -c "mount -t tmpfs none /dev/dri 2>/dev/null || true; \
     --policy-device cpu --max-steps ${MAX_STEPS:-200} \
     ${EP_IDS:+--episode-ids $EP_IDS} ${EASY:+--easy} \
     ${MAX_INSTR:+--max-instr $MAX_INSTR} \
-    ${HIST_MODE:+--history-mode $HIST_MODE} ${HIST_ALPHA:+--history-alpha $HIST_ALPHA} ${HIST_JITTER:+--history-jitter} ${REPLAN:+--replan-every $REPLAN} ${STOP_RADIUS:+--stop-radius $STOP_RADIUS}"
+    ${HIST_MODE:+--history-mode $HIST_MODE} ${HIST_ALPHA:+--history-alpha $HIST_ALPHA} ${HIST_JITTER:+--history-jitter} ${REPLAN:+--replan-every $REPLAN} ${STOP_RADIUS:+--stop-radius $STOP_RADIUS} ${STOP_MODE:+--stop-mode $STOP_MODE} ${MIN_STEPS_STOP:+--min-steps-before-stop $MIN_STEPS_STOP}"
 echo "EVAL_ROLLOUT_DONE out=$OUT"

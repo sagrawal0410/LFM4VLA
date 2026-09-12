@@ -245,11 +245,43 @@ class WaypointController:
     """
 
     def __init__(self, turn_deg: float, lookahead_m: float = 0.30,
-                 stop_radius: float = 0.50, min_steps_before_stop: int = 7):
+                 stop_radius: float = 0.50, min_steps_before_stop: int = 7,
+                 stop_mode: str = "geometric", static_tol_xy: float = 0.06,
+                 static_tol_yaw: float = 0.10, static_slots: int = 3):
         self.turn_rad = math.radians(turn_deg)
         self.lookahead = lookahead_m
         self.stop_radius = stop_radius
         self.min_steps_before_stop = min_steps_before_stop
+        # "geometric": the controller decides, from the last waypoint's distance
+        #   to the robot (the original proxy).
+        # "plan_static": the MODEL decides. Terminal-hold training teaches the
+        #   net to repeat the last real waypoint across the remaining slots, so
+        #   a stop request is a plan that stops changing. Reading that directly
+        #   removes the hand-tuned radius from the decision.
+        self.stop_mode = str(stop_mode)
+        self.static_tol_xy = float(static_tol_xy)
+        self.static_tol_yaw = float(static_tol_yaw)
+        self.static_slots = int(static_slots)
+
+    def _plan_is_static(self, w) -> bool:
+        """Is the model asking to hold position?
+
+        Measured on the training labels, the three regimes are far apart:
+            hold          dxy = 0         dyaw = 0        (exactly)
+            turn-in-place dxy = 0         dyaw >= 0.2618  (15 deg floor)
+            moving        dxy >= 0.1201
+        so the default tolerances (0.06 m, 0.10 rad) sit in an empty gap with
+        ~2x margin on both axes -- this is a decoder, not a tuning knob.
+        """
+        k = min(self.static_slots, w.shape[0] - 1)
+        if k < 1:
+            return False
+        tail = w[-(k + 1):]
+        d = np.diff(tail, axis=0)
+        dxy = np.linalg.norm(d[:, :2], axis=1)
+        dyaw = np.abs(d[:, 2])
+        return bool((dxy < self.static_tol_xy).all()
+                    and (dyaw < self.static_tol_yaw).all())
 
     def act(self, waypoints: np.ndarray, fresh: bool = True,
             step: int = 1 << 30) -> str:
@@ -277,10 +309,19 @@ class WaypointController:
         # single under-confident prediction inside stop_radius ends the episode
         # before the robot moves at all (path_len 0.0, steps 1). Real arrivals
         # cannot occur in the first few steps from a valid start pose.
-        if (fresh and step >= self.min_steps_before_stop
-                and trans < self.stop_radius
-                and abs(yaw8) < math.radians(12.0)):
-            return "stop"
+        if fresh and step >= self.min_steps_before_stop:
+            if self.stop_mode == "plan_static":
+                # The model owns the decision: it stops when it emits a plan
+                # that no longer moves. No distance threshold is consulted.
+                if self._plan_is_static(w):
+                    return "stop"
+            elif self.stop_mode == "both":
+                if (self._plan_is_static(w) and trans < self.stop_radius
+                        and abs(yaw8) < math.radians(12.0)):
+                    return "stop"
+            elif (trans < self.stop_radius
+                  and abs(yaw8) < math.radians(12.0)):
+                return "stop"
         if trans < self.lookahead and abs(yaw8) >= self.turn_rad / 2.0:
             return "turn_left" if yaw8 > 0 else "turn_right"
         tgt = None
