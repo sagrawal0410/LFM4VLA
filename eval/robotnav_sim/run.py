@@ -213,7 +213,8 @@ def rollout(sim, client, ep, args, recorder):
     ctrl = core.WaypointController(turn_deg=ep["turn_deg"],
                                    stop_radius=args.stop_radius,
                                    stop_mode=args.stop_mode,
-                                   min_steps_before_stop=args.min_steps_before_stop)
+                                   min_steps_before_stop=args.min_steps_before_stop,
+                                   stop_debounce=args.stop_debounce)
     goals = ep.get("goals") or [ep["goal"]]
     start_geo = core.geodesic_min(sim, ep["start_pos"], goals)
     ref = ep.get("ref_path")
@@ -317,6 +318,9 @@ def main():
                          "(RxR needs ~450; R2R fits in 130)")
     ap.add_argument("--max-steps", type=int, default=150)
     ap.add_argument("--out", default="results/rollouts")
+    ap.add_argument("--stop-debounce", type=int, default=1,
+                    help="honour a stop only after this many consecutive fresh "
+                         "plans request it; 1 = current behaviour")
     ap.add_argument("--stop-mode", default="geometric",
                     choices=["geometric", "plan_static", "both"],
                     help="geometric: controller decides from the last waypoint's "

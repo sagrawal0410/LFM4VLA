@@ -247,7 +247,8 @@ class WaypointController:
     def __init__(self, turn_deg: float, lookahead_m: float = 0.30,
                  stop_radius: float = 0.50, min_steps_before_stop: int = 7,
                  stop_mode: str = "geometric", static_tol_xy: float = 0.06,
-                 static_tol_yaw: float = 0.10, static_slots: int = 3):
+                 static_tol_yaw: float = 0.10, static_slots: int = 3,
+                 stop_debounce: int = 1):
         self.turn_rad = math.radians(turn_deg)
         self.lookahead = lookahead_m
         self.stop_radius = stop_radius
@@ -262,6 +263,22 @@ class WaypointController:
         self.static_tol_xy = float(static_tol_xy)
         self.static_tol_yaw = float(static_tol_yaw)
         self.static_slots = int(static_slots)
+        # Honour a stop only after it has been requested on this many
+        # CONSECUTIVE fresh plans. Measured failure mode: OS=0 episodes stop
+        # after the same travel as successes (47 vs 48 steps, 7.5 vs 7.6 m), so
+        # the model emits transient holds mid-route. A momentary hold should
+        # not end an episode; a genuine arrival persists.
+        self.stop_debounce = max(1, int(stop_debounce))
+        self._stop_votes = 0
+
+    def _wants_stop(self, w, trans: float, yaw8: float) -> bool:
+        """Does this plan request a stop, before debouncing?"""
+        geo = trans < self.stop_radius and abs(yaw8) < math.radians(12.0)
+        if self.stop_mode == "plan_static":
+            return self._plan_is_static(w)
+        if self.stop_mode == "both":
+            return self._plan_is_static(w) and geo
+        return geo
 
     def _plan_is_static(self, w) -> bool:
         """Is the model asking to hold position?
@@ -309,19 +326,14 @@ class WaypointController:
         # single under-confident prediction inside stop_radius ends the episode
         # before the robot moves at all (path_len 0.0, steps 1). Real arrivals
         # cannot occur in the first few steps from a valid start pose.
+        want_stop = False
         if fresh and step >= self.min_steps_before_stop:
-            if self.stop_mode == "plan_static":
-                # The model owns the decision: it stops when it emits a plan
-                # that no longer moves. No distance threshold is consulted.
-                if self._plan_is_static(w):
-                    return "stop"
-            elif self.stop_mode == "both":
-                if (self._plan_is_static(w) and trans < self.stop_radius
-                        and abs(yaw8) < math.radians(12.0)):
-                    return "stop"
-            elif (trans < self.stop_radius
-                  and abs(yaw8) < math.radians(12.0)):
-                return "stop"
+            want_stop = self._wants_stop(w, trans, yaw8)
+        if fresh:
+            self._stop_votes = self._stop_votes + 1 if want_stop else 0
+        if want_stop and self._stop_votes >= self.stop_debounce:
+            return "stop"
+
         if trans < self.lookahead and abs(yaw8) >= self.turn_rad / 2.0:
             return "turn_left" if yaw8 > 0 else "turn_right"
         tgt = None
