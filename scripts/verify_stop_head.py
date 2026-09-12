@@ -40,6 +40,11 @@ def main():
     module = (RobotNavTrainer.from_checkpoint(args.ckpt, "torch", cfg)
               if args.ckpt else RobotNavTrainer(cfg))
     module.train()
+    # The backbone loads bf16 while heads are built fp32; train/experiment.py
+    # casts the whole module to fp32 but only for the fsdp/ddp strategies, which
+    # a standalone script bypasses. Without this the first LFM2 conv hits
+    # "expected m1 and m2 to have the same dtype".
+    module.float()
     # _forward_batch reads self.trainer.world_size; outside Lightning that
     # property raises, so attach a minimal stand-in.
     import types
