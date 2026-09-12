@@ -714,6 +714,8 @@ class RoboLFM25VL(RoboVLMBackbone):
         # gradient at all while still looking alive in the checkpoint.
         if kwargs.get("stop_label") is not None:
             head_kwargs["stop_label"] = kwargs["stop_label"]
+        if kwargs.get("lepig_w") is not None:
+            head_kwargs["lepig_w"] = kwargs["lepig_w"]
 
         if self.is_vla_adapter:
             # Bridge Attention consumes every layer (embed + transformer blocks).
@@ -808,6 +810,15 @@ class RoboLFM25VL(RoboVLMBackbone):
                 "modified_libero_rlds_depth."
             )
 
+        # LEPIG gradient routing: identity forward, per-example scaling of the
+        # gradient that reaches the shared backbone. The action head's own
+        # parameter gradient is deliberately left unweighted -- weighting the
+        # whole FM loss would distort q(a|c) and skew the policy toward rare
+        # modes, which the plan document explicitly prohibits.
+        _w = head_kwargs.pop("lepig_w", None)
+        if _w is not None:
+            from models.lepig.routing import grad_scale_identity
+            action_hs = grad_scale_identity(action_hs, _w)
         action_logits, action_loss, depth_pred = self.forward_action_head(
             action_hs, action_labels, action_mask, **head_kwargs
         )

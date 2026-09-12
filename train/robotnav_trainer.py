@@ -109,6 +109,42 @@ class RobotNavTrainer(BaseTrainer):
             self.log(f"val_avgfde{n_draws}_m",
                      fde_s.mean(0)[valid].mean(), **log)
 
+    # ------------------------------------------------------------ LEPIG --
+    def _lepig_step(self, traj_batch):
+        """Per-step LEPIG lifecycle: snapshots, refresh, scoring, weights.
+
+        Returns detached per-example weights, or None when LEPIG is disabled or
+        still in warmup (in which case training is the uniform baseline, which
+        is exactly the control the plan document requires).
+        """
+        lep = getattr(self, "lepig", None)
+        if lep is None or not lep.enabled:
+            return None
+        from models.lepig.hooks import selected_params, jacobian_rows
+        step = int(self.global_step)
+        max_steps = int(self.configs["trainer"].get("max_steps", 80000))
+        params = selected_params(self.model, lep.plan)
+        lep.on_step(step, params)
+        lep.warm(step, max_steps)
+        if lep.should_refresh(step) and lep.refresh():
+            # curvature + anchors from THIS batch's geometry; both are rebuilt
+            # every refresh and never reused across snapshot versions.
+            G = jacobian_rows(self, traj_batch, params, lep.subspace,
+                              lep.rank)
+            if G is not None:
+                for i in range(G.shape[0]):
+                    lep.add_calibration(G[i])
+                    lep.add_anchor(G[i])
+        if not lep.ready:
+            return None
+        G = jacobian_rows(self, traj_batch, params, lep.subspace, lep.rank)
+        if G is None:
+            return None
+        scores = lep.score_batch([G[i] for i in range(G.shape[0])])
+        w = lep.weights(scores, G.shape[0], device=self.device)
+        self._lepig_last_w = w
+        return w
+
     def _forward_batch(self, batch: Dict[str, Any], mode: str = "train"):
         multi = getattr(self.trainer, "world_size", 1) > 1
         if isinstance(batch, dict) and batch.get("data_source") == "robotnav_vl":
@@ -129,6 +165,9 @@ class RobotNavTrainer(BaseTrainer):
             # sub-batch and a VL sub-batch; both losses join in ONE update.
             out: Dict[str, Any] = {"loss": None}
             if batch.get("traj") is not None:
+                w = self._lepig_step(batch["traj"]) if mode == "train" else None
+                if w is not None:
+                    batch["traj"]["lepig_w"] = w
                 out = dict(super()._forward_batch(batch["traj"], mode=mode))
             if batch.get("vl") is not None:
                 out["loss_vl_cotrain"] = self._forward_vl_batch(

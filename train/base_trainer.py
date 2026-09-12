@@ -505,6 +505,7 @@ class BaseTrainer(pl.LightningModule):
         stop_label = batch.get("stop_label")
         if stop_label is not None:
             stop_label = stop_label.to(self.device)
+        lepig_w = batch.get("lepig_w")
 
         rel_state = batch.get("rel_state")
         if rel_state is not None:
@@ -526,6 +527,7 @@ class BaseTrainer(pl.LightningModule):
             "gripper_action_chunck": gripper_action_chunck,
             "chunck_mask": chunck_mask,
             "stop_label": stop_label,
+            "lepig_w": lepig_w,
             "raw_text": batch.get("raw_text"),
             "rel_state": rel_state,
             "data_source": batch.get("data_source", "calvin_action"),
@@ -540,6 +542,7 @@ class BaseTrainer(pl.LightningModule):
             action_labels=(inputs["arm_action_chunck"], inputs["gripper_action_chunck"]),
             action_mask=inputs["chunck_mask"],
             stop_label=inputs.get("stop_label"),
+            lepig_w=inputs.get("lepig_w"),
             vision_gripper=inputs["hand_rgb"],
             raw_text=inputs["raw_text"],
             rel_state=inputs["rel_state"],
@@ -611,6 +614,8 @@ class BaseTrainer(pl.LightningModule):
                 action_labels=(inputs["arm_action_chunck"], inputs["gripper_action_chunck"]),
                 action_mask=inputs["chunck_mask"],
                 stop_label=inputs.get("stop_label"),
+                lepig_w=inputs.get("lepig_w"),
+            lepig_w=inputs.get("lepig_w"),
                 vision_gripper=inputs["hand_rgb"],
                 raw_text=inputs["raw_text"],
                 rel_state=inputs["rel_state"],
