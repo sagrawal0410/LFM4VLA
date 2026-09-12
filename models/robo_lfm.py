@@ -707,6 +707,13 @@ class RoboLFM25VL(RoboVLMBackbone):
 
         depth_hs = None
         head_kwargs: Dict[str, Any] = {}
+        # head_kwargs is an explicit allow-list, so anything arriving in
+        # **kwargs must be copied in by name or the head never sees it. The
+        # stop head's BCE target is silently dropped otherwise: stop_loss()
+        # returns None, loss_stop is never added, and the head trains with no
+        # gradient at all while still looking alive in the checkpoint.
+        if kwargs.get("stop_label") is not None:
+            head_kwargs["stop_label"] = kwargs["stop_label"]
 
         if self.is_vla_adapter:
             # Bridge Attention consumes every layer (embed + transformer blocks).
