@@ -31,11 +31,21 @@ def main():
     from train.robotnav_trainer import RobotNavTrainer
     from data.build_dataset import build_dataset
 
-    cfg["train_dataset"]["mixture_trajectory"] = 1.0     # flat traj batches
+    # "sample" mixing always returns a nested {data_source, traj, vl} batch;
+    # "batch" mixing returns homogeneous batches, and mixture_trajectory=1.0
+    # makes every one of them a trajectory batch.
+    cfg["train_dataset"]["mixture_mode"] = "batch"
+    cfg["train_dataset"]["mixture_trajectory"] = 1.0
     cfg, *_ = prepare_experiment(cfg)
     module = (RobotNavTrainer.from_checkpoint(args.ckpt, "torch", cfg)
               if args.ckpt else RobotNavTrainer(cfg))
     module.train()
+    # _forward_batch reads self.trainer.world_size; outside Lightning that
+    # property raises, so attach a minimal stand-in.
+    import types
+    module._trainer = types.SimpleNamespace(
+        world_size=1, global_rank=0, local_rank=0, num_devices=1,
+        global_step=0, current_epoch=0, max_steps=1, estimated_stepping_batches=1)
 
     head = module.model.act_head
     print(f"  use_stop_head          : {getattr(head, 'use_stop_head', None)}")
@@ -45,7 +55,14 @@ def main():
 
     ds = build_dataset(cfg["train_dataset"], cfg, module.model)
     it = iter(ds)
-    batch = ds.collater([next(it) for _ in range(2)])
+    buf = []
+    while len(buf) < 2:
+        s_ = next(it)
+        if s_.get("sample_type") == "traj":
+            buf.append(s_)
+    batch = ds.collater(buf)
+    if "traj" in batch and isinstance(batch.get("traj"), dict):
+        batch = batch["traj"]            # unwrap if mixed mode slipped through
     print(f"  batch keys             : {sorted(batch.keys())[:8]}")
     print(f"  stop_label present     : {'stop_label' in batch}")
     if "stop_label" in batch:
