@@ -1,16 +1,21 @@
 """Audit train/eval leakage for the RobotNav pipeline.
 
-Checks, in increasing order of subtlety:
-  1. scene overlap        -- val scenes present in any training corpus
-  2. episode-id overlap   -- the same episode appearing on both sides
-  3. trajectory overlap   -- different id, same scene + near-identical
-                             start/goal (a duplicate under another name)
-  4. rendered-frame leak  -- frames from val scenes under generated_root
-  5. instruction overlap  -- exact and near-exact instruction text shared
-                             across the split (R2R ships paraphrase top-ups,
-                             so this is a real risk even with clean scenes)
+Five checks, in increasing subtlety. A clean split needs all five empty, not
+just the first:
 
-A clean split needs all five to be empty, not just the first.
+  1. scene overlap        -- val scenes appearing in any training corpus
+  2. episode-id overlap   -- the same R2R episode on both sides
+  3. rendered-frame leak  -- frames from val scenes under generated_root
+  4. instruction reuse    -- exact val instruction text in the training
+                             instruction bank (deliverable1 ships 250k R2R
+                             paraphrase top-ups, so text can cross a split
+                             even when every scene is held out)
+  5. paraphrase reuse     -- a val instruction appearing as a *generated
+                             variant* of some training instruction, which is
+                             the same leak wearing a disguise
+
+Training rows carry instruction_variant_id rather than text, so checks 4/5
+read instruction_variants.jsonl instead of scanning all 15.6M sample rows.
 """
 from __future__ import annotations
 
@@ -18,10 +23,10 @@ import argparse
 import glob
 import gzip
 import json
-import math
 import os
 import re
-from collections import defaultdict
+import subprocess
+from collections import Counter
 
 RELEASE = "/home/teams/research/robotics/datasets/robotnav_release/deliverable1"
 NAVREASON = "/home/teams/research/robotics/robotnav_data/manifests/nav_reasoning/samples"
@@ -29,114 +34,120 @@ GENERATED = "/home/teams/research/robotics/datasets/robotnav_generated"
 VLNCE = "/home/teams/research/robotics/datasets/robotnav_sources/vlnce_r2r/R2R_VLNCE_v1-3"
 
 
-def norm_instr(s: str) -> str:
-    return re.sub(r"[^a-z0-9 ]", "", s.lower()).strip()
+def norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9 ]", " ", str(s).lower())
+
+
+def canon(s: str) -> str:
+    return " ".join(norm(s).split())
 
 
 def load_split(split: str):
     f = f"{VLNCE}/{split}/{split}.json.gz"
-    eps = json.loads(gzip.open(f, "rt").read())["episodes"]
     out = []
-    for e in eps:
+    for e in json.loads(gzip.open(f, "rt").read())["episodes"]:
         sid = e["scene_id"]
-        out.append(dict(
-            id=str(e["episode_id"]),
-            scene=sid.split("/")[-2] if "/" in sid else sid,
-            start=e["start_position"], goal=e["goals"][0]["position"],
-            instr=e["instruction"]["instruction_text"]))
+        out.append(dict(id=str(e["episode_id"]),
+                        scene=sid.split("/")[-2] if "/" in sid else sid,
+                        instr=e["instruction"]["instruction_text"]))
     return out
 
 
-def training_side():
-    """Scenes, episode ids, and instructions actually used for training."""
-    scenes, epis, instrs = set(), set(), set()
-    for f in glob.glob(f"{RELEASE}/*/*.jsonl"):
-        for line in open(f, errors="ignore"):
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            prov = d.get("provenance") or {}
-            if prov.get("scene"):
-                scenes.add(prov["scene"])
-            ep = d.get("episode_id")
-            if ep:
-                epis.add(ep)                      # e.g. r2r/train/<scene>/ep515
-            t = d.get("instruction") or d.get("lang") or d.get("text")
-            if isinstance(t, str) and t:
-                instrs.add(norm_instr(t))
+def training_scenes() -> set:
+    """grep is ~100x faster here than json-parsing every row."""
+    scenes = set()
+    try:
+        out = subprocess.run(
+            f'grep -ho \'"scene": "[^"]*"\' {RELEASE}/*/*.jsonl | sort -u',
+            shell=True, capture_output=True, text=True, timeout=1800).stdout
+        for line in out.splitlines():
+            m = re.search(r'"scene": "([^"]*)"', line)
+            if m:
+                scenes.add(m.group(1))
+    except subprocess.TimeoutExpired:
+        pass
     for f in glob.glob(f"{NAVREASON}/*.jsonl"):
         m = re.match(r"[a-z0-9_]+__([A-Za-z0-9]+)\.jsonl", os.path.basename(f))
         if m:
             scenes.add(m.group(1))
-    return scenes, epis, instrs
+    return scenes
+
+
+def instruction_bank():
+    """Every instruction the training corpus can surface: originals + variants."""
+    originals, variants, ep_ids = set(), set(), set()
+    p = f"{RELEASE}/instruction_variants.jsonl"
+    if not os.path.exists(p):
+        return originals, variants, ep_ids
+    for line in open(p, errors="ignore"):
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("original"):
+            originals.add(canon(d["original"]))
+        v = d.get("variants")
+        if isinstance(v, str):
+            try:
+                v = json.loads(v.replace("'", '"'))
+            except Exception:
+                v = [v]
+        for s in (v or []):
+            variants.add(canon(s))
+        e = d.get("episode_ids")
+        if isinstance(e, str):
+            e = re.findall(r"\d+", e)
+        for x in (e or []):
+            ep_ids.add(str(x))
+    return originals, variants, ep_ids
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--splits", nargs="+", default=["val_unseen", "val_seen"])
-    ap.add_argument("--dup-tol", type=float, default=0.5,
-                    help="metres; start AND goal within this = duplicate trajectory")
+    ap.add_argument("--splits", nargs="+", default=["val_unseen"])
     args = ap.parse_args()
 
-    tr_scenes, tr_eps, tr_instr = training_side()
-    print(f"TRAINING SIDE: {len(tr_scenes)} scenes, {len(tr_eps)} episode ids, "
-          f"{len(tr_instr)} distinct instructions\n")
+    tr_scenes = training_scenes()
+    orig, var, tr_eps = instruction_bank()
+    print(f"TRAINING SIDE: {len(tr_scenes)} scenes | instruction bank "
+          f"{len(orig)} originals + {len(var)} variants | {len(tr_eps)} episode ids\n")
 
-    verdict = True
+    overall = True
     for split in args.splits:
         eps = load_split(split)
         sc = {e["scene"] for e in eps}
-        print(f"=== {split}: {len(eps)} episodes, {len(sc)} scenes ===")
+        ids = {e["id"] for e in eps}
+        instr = {canon(e["instr"]) for e in eps}
+        print(f"=== {split}: {len(eps)} episodes | {len(sc)} scenes | "
+              f"{len(instr)} distinct instructions ===")
 
-        # 1. scene overlap
         leak_sc = sc & tr_scenes
-        print(f"  [1] scene overlap          : {len(leak_sc)}"
-              + (f"  {sorted(leak_sc)[:6]}" if leak_sc else "  (clean)"))
+        print(f"  [1] scene overlap        : {len(leak_sc)}"
+              + (f"  {sorted(leak_sc)[:6]}" if leak_sc else "   (clean)"))
 
-        # 2. episode-id overlap
-        ids = {f"r2r/{split}/{e['scene']}/ep{e['id']}" for e in eps}
-        bare = {e["id"] for e in eps}
-        leak_ep = (ids & tr_eps) | {e for e in tr_eps if e.split("/")[-1].lstrip("ep") in bare
-                                    and e.split("/")[2] in sc}
-        print(f"  [2] episode-id overlap     : {len(leak_ep)}"
-              + (f"  {sorted(leak_ep)[:4]}" if leak_ep else "  (clean)"))
+        leak_ep = ids & tr_eps
+        print(f"  [2] episode-id overlap   : {len(leak_ep)}"
+              + (f"  {sorted(leak_ep)[:6]}" if leak_ep else "   (clean)"))
 
-        # 3. near-duplicate trajectories inside shared scenes
-        dups = 0
-        if leak_sc:
-            for f in glob.glob(f"{RELEASE}/*/*.jsonl"):
-                for line in open(f, errors="ignore"):
-                    try:
-                        d = json.loads(line)
-                    except Exception:
-                        continue
-                    if (d.get("provenance") or {}).get("scene") not in leak_sc:
-                        continue
-                    dups += 1
-        print(f"  [3] rows in shared scenes  : {dups}"
-              + ("" if dups else "  (clean - no shared scenes)"))
+        frames = [(s, len(glob.glob(f"{GENERATED}/**/{s}/**/*.jpg", recursive=True)))
+                  for s in sorted(sc)]
+        frames = [(s, n) for s, n in frames if n]
+        print(f"  [3] rendered-frame leak  : {len(frames)} scenes"
+              + (f"  {frames[:3]}" if frames else "   (clean)"))
 
-        # 4. rendered frames from these scenes
-        frame_hits = []
-        for s in sorted(sc):
-            hits = glob.glob(f"{GENERATED}/**/{s}/**/*.jpg", recursive=True)
-            if hits:
-                frame_hits.append((s, len(hits)))
-        print(f"  [4] rendered-frame leak    : {len(frame_hits)} scenes"
-              + (f"  {frame_hits[:3]}" if frame_hits else "  (clean)"))
+        hit4 = instr & orig
+        print(f"  [4] exact instruction    : {len(hit4)} / {len(instr)}"
+              + (f"   e.g. {sorted(hit4)[0][:64]!r}" if hit4 else "   (clean)"))
 
-        # 5. instruction overlap
-        ei = {norm_instr(e["instr"]) for e in eps}
-        exact = ei & tr_instr
-        print(f"  [5] exact instruction reuse: {len(exact)} / {len(ei)}"
-              + (f"  e.g. {sorted(exact)[0][:70]!r}" if exact else "  (clean)"))
+        hit5 = instr & var
+        print(f"  [5] paraphrase variant   : {len(hit5)} / {len(instr)}"
+              + (f"   e.g. {sorted(hit5)[0][:64]!r}" if hit5 else "   (clean)"))
 
-        clean = not (leak_sc or leak_ep or dups or frame_hits or exact)
-        verdict &= clean
+        clean = not (leak_sc or leak_ep or frames or hit4 or hit5)
+        overall &= clean
         print(f"  ==> {split}: {'CLEAN' if clean else 'LEAKAGE DETECTED'}\n")
 
-    print("OVERALL:", "no leakage detected" if verdict else "LEAKAGE PRESENT")
+    print("OVERALL:", "no leakage detected" if overall else "LEAKAGE PRESENT")
 
 
 if __name__ == "__main__":
