@@ -7,10 +7,12 @@ left"), so *every* pair looks similar and any threshold is arbitrary.
 
 So this does four things:
 
-  A. PROVENANCE (decisive). instruction_variants.jsonl records the episode ids
-     each entry was built from. If any entry references a val episode id, that
-     val instruction is literally in the training bank. This is ground truth,
-     not a similarity heuristic.
+  A. PROVENANCE (decisive). Keyed on TRAJECTORY id, not episode id: R2R
+     numbers episodes from 1 inside every split, so train/val_seen/val_unseen
+     episode ids collide almost completely (778/778 and 1836/1839) and an
+     episode-id check reports pure noise. Trajectory ids are disjoint across
+     splits and the bank key encodes one (r2r_traj<ID>_<hash>), so this is
+     ground truth rather than a similarity heuristic.
 
   B. EXACT collision after canonicalisation.
 
@@ -90,10 +92,10 @@ def load_bank():
             d = json.loads(line)
         except Exception:
             continue
-        eids = d.get("episode_ids")
-        if isinstance(eids, str):
-            eids = re.findall(r"\d+", eids)
-        eids = [str(x) for x in (eids or [])]
+        # Trajectory id from the key, NOT episode_ids -- see the module
+        # docstring: episode ids are reused across splits and match by accident.
+        m = re.match(r"r2r_traj(\d+)_", d.get("key", "") or "")
+        traj = m.group(1) if m else None
         v = d.get("variants")
         if isinstance(v, str):
             try:
@@ -105,7 +107,7 @@ def load_bank():
         for kind, t in texts:
             if t:
                 entries.append(dict(kind=kind, text=t, key=d.get("key", ""),
-                                    eids=eids))
+                                    traj=traj))
     return entries
 
 
@@ -163,12 +165,12 @@ def main():
               f"{len({e['traj'] for e in eps})} trajectories ===")
 
         # ---- A. provenance: does the bank reference val episode ids? -------
-        val_ids = {e["id"] for e in eps}
-        prov_hits = [b for b in bank if val_ids & set(b["eids"])]
-        print(f"  [A] bank entries citing a {split} episode id : {len(prov_hits)}")
+        val_traj = {e["traj"] for e in eps}
+        prov_hits = [b for b in bank if b["traj"] and b["traj"] in val_traj]
+        print(f"  [A] bank entries built from a {split} TRAJECTORY : {len(prov_hits)}")
         if prov_hits:
             for b in prov_hits[:5]:
-                print(f"        key={b['key']} kind={b['kind']} eids={b['eids'][:4]}")
+                print(f"        key={b['key']} kind={b['kind']} traj={b['traj']}")
 
         # ---- B. exact collision -------------------------------------------
         exact = [e for e in eps if canon(e["text"]) in canon_index]
@@ -193,6 +195,9 @@ def main():
             if bi >= 0:
                 best.append((bs, e, bank[bi]))
         best.sort(key=lambda x: -x[0])
+        # Text similarity across DIFFERENT scenes is not leakage: R2R shares a
+        # tiny navigation vocabulary, and "go up the stairs and turn left"
+        # carries no information about a building the model never saw.
         above = [b for b in best if b[0] > pmax]
         print(f"  [C] val instructions above the null max      : {len(above)} "
               f"/ {len(eps)}")
