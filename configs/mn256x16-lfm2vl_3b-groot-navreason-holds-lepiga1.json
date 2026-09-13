@@ -213,6 +213,33 @@
       2,
       4,
       8
-    ]
+    ],
+    "lora": {
+      "last_n_vlm_blocks": 4,
+      "rank": 32,
+      "alpha": 64,
+      "dropout": 0.0,
+      "bias": "none",
+      "attention_targets": [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "out_proj"
+      ],
+      "mlp_targets": [
+        "w1",
+        "w3",
+        "w2"
+      ],
+      "live_model": "trainable",
+      "base_vlm_weights": "trainable",
+      "_spec_name_mapping": {
+        "o_proj": "out_proj",
+        "gate_proj": "w1",
+        "up_proj": "w3",
+        "down_proj": "w2"
+      }
+    },
+    "lora_in_posterior": false
   }
 }
