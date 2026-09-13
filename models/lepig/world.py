@@ -112,11 +112,23 @@ class WorldBranch(nn.Module):
                                        self.target_pool_tokens, self.target_dim)
 
     @staticmethod
-    def loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """LayerNorm then mean L1, stop-gradient on the target."""
+    def loss(pred: torch.Tensor, target: torch.Tensor,
+             weights: torch.Tensor | None = None) -> torch.Tensor:
+        """LayerNorm then L1, stop-gradient on the target.
+
+        Reduced PER SAMPLE first so `weights` can scale each example: plan B is
+        defined by weighting this loss and leaving the backbone gradient alone,
+        so a scalar mean here would make B identical to an unweighted baseline.
+        """
         t = target.detach()
         ln = lambda v: torch.nn.functional.layer_norm(v, (v.shape[-1],))
-        return (ln(pred) - ln(t)).abs().mean()
+        per = (ln(pred) - ln(t)).abs().flatten(1).mean(1)      # [B]
+        if weights is None:
+            return per.mean()
+        w = weights.detach().to(per.device, per.dtype).reshape(-1)
+        if w.numel() != per.numel():
+            return per.mean()
+        return (per * w).mean()
 
 
 class FrozenWhitening(nn.Module):
