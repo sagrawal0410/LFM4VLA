@@ -47,19 +47,42 @@ class LoRALinear(nn.Module):
         return out + self.scaling * self.lora_B(h).to(out.dtype)
 
 
-def _find_blocks(model) -> List[nn.Module]:
-    """Locate the VLM transformer block list, whatever it is called here."""
+LANG_HINTS = ("language_model", "text_model", "llm", "language_tower", "decoder")
+VISION_HINTS = ("vision", "visual", "image_tower", "siglip", "vit")
+
+
+def _find_blocks(model, prefer_language: bool = True) -> List[nn.Module]:
+    """Locate the LANGUAGE tower's transformer block list.
+
+    Targeting must be explicit, not "longest stack with attention names": a VLM
+    also has a vision tower whose blocks carry q/k/v/out_proj, and adapters
+    placed there would express uncertainty about image features rather than
+    about the representation the action expert actually consumes -- the same
+    error as confining the posterior to an adapter, just relocated.
+    """
     cands = []
     for name, mod in model.named_modules():
         if isinstance(mod, (nn.ModuleList, nn.Sequential)) and len(mod) >= 4:
-            child = mod[0]
-            names = {n for n, _ in child.named_modules()}
-            if any(t in n for n in names for t in DEFAULT_ATTN):
-                cands.append((name, mod))
+            leaves = {n.split(".")[-1] for n, sub in mod[0].named_modules()
+                      if isinstance(sub, nn.Linear)}
+            if not leaves:
+                continue
+            low = name.lower()
+            is_vision = any(h in low for h in VISION_HINTS)
+            is_lang = any(h in low for h in LANG_HINTS)
+            cands.append((name, mod, is_lang, is_vision, len(mod)))
     if not cands:
         return []
-    # Deepest/longest stack is the language tower, not a small adapter stack.
-    cands.sort(key=lambda kv: (len(kv[1]), -kv[0].count(".")))
+    if prefer_language:
+        lang = [c for c in cands if c[2] and not c[3]]
+        if lang:
+            lang.sort(key=lambda c: c[4])
+            return list(lang[-1][1])
+        nonvis = [c for c in cands if not c[3]]
+        if nonvis:
+            nonvis.sort(key=lambda c: c[4])
+            return list(nonvis[-1][1])
+    cands.sort(key=lambda c: c[4])
     return list(cands[-1][1])
 
 
@@ -71,6 +94,10 @@ def inject_lora(model, last_n: int = 4, rank: int = 32, alpha: int = 64,
     blocks = _find_blocks(model)
     if not blocks:
         raise RuntimeError("inject_lora: could not locate the VLM block stack")
+    leaves = sorted({n.split(".")[-1] for n, sub in blocks[-1].named_modules()
+                     if isinstance(sub, nn.Linear)})
+    print(f"[lepig] LoRA stack: {len(blocks)} blocks, leaf linears={leaves}",
+          flush=True)
     targets = tuple(attention_targets) + tuple(mlp_targets)
     wrapped = 0
     for blk in blocks[-int(last_n):]:
