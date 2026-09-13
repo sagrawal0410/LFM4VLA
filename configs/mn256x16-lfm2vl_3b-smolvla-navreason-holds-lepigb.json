@@ -238,15 +238,21 @@
         "q_proj",
         "k_proj",
         "v_proj",
-        "o_proj"
+        "out_proj"
       ],
       "mlp_targets": [
-        "gate_proj",
-        "up_proj",
-        "down_proj"
+        "w1",
+        "w3",
+        "w2"
       ],
       "live_model": "trainable",
-      "base_vlm_weights": "trainable"
+      "base_vlm_weights": "trainable",
+      "_spec_name_mapping": {
+        "o_proj": "out_proj",
+        "gate_proj": "w1",
+        "up_proj": "w3",
+        "down_proj": "w2"
+      }
     },
     "target_encoder_name": "frozen_vjepa2"
   }
