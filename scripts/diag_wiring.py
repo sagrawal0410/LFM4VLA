@@ -1,0 +1,110 @@
+"""Prove the LEPIG-A and stop-head wiring is live, not merely present.
+
+Built-but-never-called has cost this project days twice. Each check here is a
+measurement with an unambiguous failure value, not an inspection.
+"""
+import glob, json, os, subprocess, sys, types
+
+import torch
+
+CK = "/home/teams/research/robotics/checkpoints"
+
+
+def code_freshness(jobid, files):
+    """A running process uses the code it imported at start. Anything edited
+    after that start time is NOT in the running job."""
+    start = subprocess.run(["sacct", "-j", str(jobid), "-X", "-n", "--format=Start"],
+                           capture_output=True, text=True).stdout.strip()
+    if not start or start == "Unknown":
+        return None, []
+    import datetime
+    st = datetime.datetime.fromisoformat(start).timestamp()
+    stale = [f for f in files if os.path.getmtime(f) > st]
+    return start, stale
+
+
+def stop_head_delta():
+    d = glob.glob(CK + "/*/lfm2vl_3b_mlp_*STOPHEAD*")
+    if not d:
+        return "no stophead dir"
+    cks = sorted(glob.glob(d[0] + "/step-*.ckpt"), key=os.path.getmtime)
+    if len(cks) < 2:
+        return "only %d checkpoint(s)" % len(cks)
+    def head(c):
+        sd = torch.load(c, map_location="cpu", weights_only=False)["state_dict"]
+        return {k: v.float() for k, v in sd.items() if "stop_head" in k}
+    a, b = head(cks[-2]), head(cks[-1])
+    ta = os.path.basename(cks[-2]).split("step=")[-1].replace(".ckpt", "")
+    tb = os.path.basename(cks[-1]).split("step=")[-1].replace(".ckpt", "")
+    tot = sum(float((b[k] - a[k]).abs().sum()) for k in a)
+    return "%s->%s  |delta|=%.4e  %s" % (
+        ta, tb, tot, "LEARNING" if tot > 1e-6 else "FROZEN/DEAD")
+
+
+def routing_efficacy():
+    """The check never run: do non-uniform weights actually change the backbone
+    gradient? Uniform w=1 must give a different backbone gradient than w=[1.5,0.5]
+    -- if they match, grad_scale_identity is a no-op in the live path."""
+    from models.lepig.routing import grad_scale_identity
+    torch.manual_seed(0)
+    res = {}
+    for name, w in (("uniform", torch.ones(2)), ("weighted", torch.tensor([1.5, 0.5]))):
+        torch.manual_seed(0)
+        backbone = torch.nn.Linear(8, 8)
+        h = backbone(torch.randn(2, 4, 8))
+        routed = grad_scale_identity(h, w)
+        routed.pow(2).sum().backward()
+        res[name] = float(backbone.weight.grad.norm())
+    same = abs(res["uniform"] - res["weighted"]) < 1e-9
+    return "uniform=%.6f weighted=%.6f -> %s" % (
+        res["uniform"], res["weighted"],
+        "NO-OP (routing dead)" if same else "ROUTING ACTIVE")
+
+
+def dataloader_future_frames():
+    """Plans B/C need a frame at t+H. Confirm the loader emits one."""
+    from train.experiment_utils import prepare_experiment
+    from data.build_dataset import build_dataset
+    cfg = json.load(open("configs/mn256x16-lfm2vl_3b-smolvla-navreason-holds-lepigb.json"))
+    cfg["train_dataset"]["mixture_mode"] = "batch"
+    cfg["train_dataset"]["mixture_trajectory"] = 1.0
+    cfg["train_dataset"]["world_horizons"] = [2, 4, 8]
+    cfg["batch_size"] = 2
+    cfg, *_ = prepare_experiment(cfg)
+    ds = build_dataset(cfg["train_dataset"], cfg, None)
+    it = iter(ds); buf = []
+    while len(buf) < 2:
+        s = next(it)
+        if s.get("sample_type") == "traj":
+            buf.append(s)
+    b = ds.collater(buf)
+    fut = b.get("future_rgb")
+    if fut is None:
+        return "future_rgb ABSENT -- B/C cannot train"
+    return "future_rgb %s  dtype=%s  OK" % (tuple(fut.shape), fut.dtype)
+
+
+print("=" * 68)
+print("1. STOP HEAD")
+print("   weight delta :", stop_head_delta())
+st, stale = code_freshness(2336949, ["models/robo_lfm.py", "models/base_policy.py"])
+print("   job start    :", st)
+print("   stale files  :", stale if stale else "none (running job has the fix)")
+
+print("\n2. LEPIG ROUTING")
+print("   efficacy     :", routing_efficacy())
+
+print("\n3. LEPIG-A RUNNING JOBS")
+wired = ["train/robotnav_trainer.py", "train/base_trainer.py",
+         "models/robo_lfm.py", "models/lepig/hooks.py"]
+for jid, nm in ((2337586, "lp-a1-smolvla"), (2337587, "lp-a2-smolvla"),
+                (2337588, "lp-a2-groot")):
+    st, stale = code_freshness(jid, wired)
+    print("   %-15s start=%s stale=%s" % (nm, st, stale if stale else "none"))
+
+print("\n4. DATALOADER FUTURE FRAMES (plans B/C)")
+try:
+    print("   ", dataloader_future_frames())
+except Exception as e:
+    print("    FAILED:", type(e).__name__, str(e)[:150])
+print("=" * 68)
