@@ -307,11 +307,49 @@ class BaseTrainer(pl.LightningModule):
         self.clip_gradients(optimizer, gradient_clip_val,
                             gradient_clip_algorithm)
 
+    def _remap_lora_checkpoint(self, checkpoint):
+        """Make pre-LoRA checkpoints loadable into a LoRA-equipped model.
+
+        LoRALinear wraps the original Linear as `.base`, so a checkpoint written
+        before injection has `...w1.weight` where the model now expects
+        `...w1.base.weight`; strict loading rejects every wrapped site. Remap
+        those keys and seed the adapters from the freshly initialised model.
+        lora_B is zero at init, so the resumed model is numerically identical
+        to the checkpoint it came from.
+        """
+        sd = checkpoint.get("state_dict") if isinstance(checkpoint, dict) else None
+        if not sd:
+            return
+        try:
+            from models.lepig.lora import LoRALinear
+        except Exception:
+            return
+        wrapped = [n for n, m in self.named_modules() if isinstance(m, LoRALinear)]
+        if not wrapped:
+            return
+        moved = 0
+        for prefix in wrapped:
+            for suffix in ("weight", "bias"):
+                old_k, new_k = f"{prefix}.{suffix}", f"{prefix}.base.{suffix}"
+                if old_k in sd and new_k not in sd:
+                    sd[new_k] = sd.pop(old_k)
+                    moved += 1
+        cur = self.state_dict()
+        added = 0
+        for k, v in cur.items():
+            if (".lora_A." in k or ".lora_B." in k) and k not in sd:
+                sd[k] = v.clone()
+                added += 1
+        if moved or added:
+            print(f"[lepig] checkpoint remap: {moved} base keys, "
+                  f"{added} fresh adapter keys", flush=True)
+
     def on_load_checkpoint(self, checkpoint):
         """Defensive resume: if the saved optimizer's param-group sizes don't
         match this process's trainable params, drop optimizer/scheduler state
         and warm-start them — weights, global step, loops, and the wandb run
         all still resume. Prevents a hard crash in restore_optimizers."""
+        self._remap_lora_checkpoint(checkpoint)
         fresh = [len(g["params"]) for g in self.get_grouped_params(self.model)]
         saved_states = checkpoint.get("optimizer_states") or []
         saved = [[len(g["params"]) for g in s.get("param_groups", [])]

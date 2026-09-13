@@ -248,7 +248,7 @@ class RobotNavTrainer(BaseTrainer):
                 and batch.get("data_source") == "robotnav_traj"
                 and getattr(self, "world_branch", None) is not None):
             w = self._lepig_step(batch) if mode == "train" else None
-            if w is not None:
+            if w is not None and self.lepig.routes_backbone_fm_grad:
                 batch["lepig_w"] = w
             out = dict(super()._forward_batch(batch, mode=mode))
             return self._add_world_loss(out, batch, w, mode)
@@ -272,7 +272,11 @@ class RobotNavTrainer(BaseTrainer):
             out: Dict[str, Any] = {"loss": None}
             if batch.get("traj") is not None:
                 w = self._lepig_step(batch["traj"]) if mode == "train" else None
-                if w is not None:
+                # Plan B weights ONLY the world loss: its action supervision must
+                # stay uniform, so the FM gradient is not routed. Routing for B
+                # would make it identical to C, which is the single distinction
+                # those two arms exist to measure.
+                if w is not None and self.lepig.routes_backbone_fm_grad:
                     batch["traj"]["lepig_w"] = w
                 out = dict(super()._forward_batch(batch["traj"], mode=mode))
                 out = self._add_world_loss(out, batch["traj"], w, mode)
