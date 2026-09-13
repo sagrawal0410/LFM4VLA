@@ -64,7 +64,11 @@
     "with_history": true,
     "history_type": "pre",
     "language_temporal_tags": true,
-    "frame_offset_tags": false
+    "frame_offset_tags": false,
+    "stop_head": true,
+    "stop_pos_weight": 8.0,
+    "stop_loss_weight": 1.0,
+    "stop_head_detach": true
   },
   "fwd_head": null,
   "tokenizer": {

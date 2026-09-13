@@ -325,8 +325,6 @@ class BaseTrainer(pl.LightningModule):
         except Exception:
             return
         wrapped = [n for n, m in self.named_modules() if isinstance(m, LoRALinear)]
-        if not wrapped:
-            return
         moved = 0
         for prefix in wrapped:
             for suffix in ("weight", "bias"):
@@ -334,15 +332,19 @@ class BaseTrainer(pl.LightningModule):
                 if old_k in sd and new_k not in sd:
                     sd[new_k] = sd.pop(old_k)
                     moved += 1
+        # Seed ANY key the live model has but the checkpoint lacks. LoRA was the
+        # first case; the stop head is the second, and a third architectural
+        # addition would hit the same wall. Restricting this to lora_* would
+        # just defer the same failure.
         cur = self.state_dict()
         added = 0
         for k, v in cur.items():
-            if (".lora_A." in k or ".lora_B." in k) and k not in sd:
+            if k not in sd:
                 sd[k] = v.clone()
                 added += 1
         if moved or added:
-            print(f"[lepig] checkpoint remap: {moved} base keys, "
-                  f"{added} fresh adapter keys", flush=True)
+            print(f"[lepig] checkpoint remap: {moved} base keys renamed, "
+                  f"{added} keys seeded from init", flush=True)
 
     def on_load_checkpoint(self, checkpoint):
         """Defensive resume: if the saved optimizer's param-group sizes don't

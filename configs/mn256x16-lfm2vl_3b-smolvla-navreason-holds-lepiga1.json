@@ -65,7 +65,11 @@
     "history_type": "pre",
     "language_temporal_tags": true,
     "frame_offset_tags": false,
-    "num_vlm_layers": 30
+    "num_vlm_layers": 30,
+    "stop_head": true,
+    "stop_pos_weight": 8.0,
+    "stop_loss_weight": 1.0,
+    "stop_head_detach": true
   },
   "fwd_head": null,
   "tokenizer": {
