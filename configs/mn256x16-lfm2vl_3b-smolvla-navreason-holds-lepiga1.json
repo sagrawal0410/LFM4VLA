@@ -192,6 +192,28 @@
     "plan": "a1",
     "posterior": "flow_head_only",
     "backbone_hidden": 2048,
-    "target_dim": 1024
+    "target_dim": 1024,
+    "full_model_trainable": true,
+    "mixed_precision_forward": "bf16",
+    "curvature_precision": "fp32",
+    "seed": 0,
+    "scoring_snapshot": "ema",
+    "anchor_balanced": true,
+    "anchor_refresh_each_snapshot": true,
+    "predictive_functional": "final_generated_action",
+    "solver": "inherit_exact_inference_solver",
+    "base_noise_seeds_per_example": 1,
+    "diagnostic_noise_seeds": 4,
+    "action_standardization": "training_set_mean_std",
+    "prefix_normalization": "1/sqrt(H*d_action)",
+    "local_observation_covariance": "identity_after_whitening",
+    "gradient_target": "backbone_only",
+    "flow_head_gradient_weight": 1.0,
+    "action_chunk_horizons": [
+      1,
+      2,
+      4,
+      8
+    ]
   }
 }

@@ -54,6 +54,8 @@ class LepigController:
             window_steps=int(self.cfg.get("trajectory_window_steps", 2000)))
         self.posterior: Optional[SubspacePosterior] = None
         self.anchors: List[torch.Tensor] = []
+        self.anchor_balanced = bool(self.cfg.get("anchor_balanced", True))
+        self._anchor_keys: dict = {}
         self.snapshot_id = 0
         self._warmed = False
 
@@ -96,6 +98,7 @@ class LepigController:
             prior_precision=float(self.cfg.get("prior_precision", 1.0)),
             jitter_rel=float(self.cfg.get("jitter_rel", 1e-5)))
         self.anchors = []
+        self._anchor_keys = {}
         self.snapshot_id += 1        # never reuse Jacobians across snapshots
         return True
 
@@ -105,9 +108,31 @@ class LepigController:
             self.posterior.add_fisher(
                 SubspacePosterior.fisher_from_jac(G, self.obs_var))
 
-    def add_anchor(self, G: torch.Tensor):
-        if len(self.anchors) < self.anchor_count:
-            self.anchors.append(G.detach().float())
+    def add_anchor(self, G: torch.Tensor, key=None):
+        """Add one anchor, keeping the bank approximately balanced.
+
+        Spec 3.10: 64 training-only anchors balanced across scene, instruction
+        family and trajectory-progress quartile. Filling first-come would make
+        the bank a sample of whatever the first batches happened to contain, so
+        each stratum gets a quota and over-represented strata are skipped once
+        their quota is met.
+        """
+        G = G.detach().float()
+        if key is None or not self.anchor_balanced:
+            if len(self.anchors) < self.anchor_count:
+                self.anchors.append(G)
+            return
+        quota = max(1, self.anchor_count // max(1, len(self._anchor_keys) + 1))
+        have = self._anchor_keys.get(key, 0)
+        if len(self.anchors) < self.anchor_count and have < quota:
+            self.anchors.append(G)
+            self._anchor_keys[key] = have + 1
+        elif len(self.anchors) < self.anchor_count and have >= quota:
+            # bank not full but this stratum is: accept only if nothing else is
+            # filling it, so the bank still reaches anchor_count.
+            if sum(self._anchor_keys.values()) >= self.anchor_count - 1:
+                self.anchors.append(G)
+                self._anchor_keys[key] = have + 1
 
     @property
     def ready(self) -> bool:

@@ -133,8 +133,29 @@ class RobotNavTrainer(BaseTrainer):
             tgt = tgt.reshape(b, h, *tgt.shape[1:])              # [B, H, N, D]
         ctx = self._world_context(traj_batch)                    # backbone features
         pred = self.world_branch(ctx)                            # [B, H, N, D]
+        # Fit the frozen PCA-whitening ONCE, on training targets only. It is
+        # used for the PIG functional, never in the loss path -- a trainable
+        # projection there could collapse the space and make the score
+        # meaningless (spec step 9: R_W = I in the 128-D whitened space).
+        if self.world_whiten is not None and not self.world_whiten.fitted:
+            self.world_whiten.fit(tgt.reshape(-1, tgt.shape[-1]).float())
+        self._last_world_pred = pred
+        self._last_world_tgt = tgt
         loss = self.world_branch.loss(pred, tgt, weights=weights)
         return loss
+
+    def world_functional(self):
+        """The PIG functional for plans B/C: whitened predicted world latent."""
+        pred = getattr(self, "_last_world_pred", None)
+        if pred is None:
+            return None
+        flat = pred.reshape(pred.shape[0], -1, pred.shape[-1])
+        if self.world_whiten is not None and self.world_whiten.fitted:
+            flat = self.world_whiten(flat.reshape(-1, flat.shape[-1]))
+            flat = flat.reshape(pred.shape[0], -1)
+        else:
+            flat = flat.reshape(pred.shape[0], -1)
+        return flat / (flat.shape[-1] ** 0.5)
 
     def _world_context(self, traj_batch):
         """Backbone hidden states the world branch reads from."""
@@ -176,9 +197,20 @@ class RobotNavTrainer(BaseTrainer):
             G = jacobian_rows(self, traj_batch, params, lep.subspace,
                               lep.rank)
             if G is not None:
+                fams = traj_batch.get("family") or []
                 for i in range(G.shape[0]):
                     lep.add_calibration(G[i])
-                    lep.add_anchor(G[i])
+                    # Stratum for balancing: instruction family x progress
+                    # quartile. Scene id is not carried on the batch, so family
+                    # stands in for it -- families map to distinct suites and
+                    # therefore to disjoint scene sets.
+                    fam = fams[i] if i < len(fams) else "?"
+                    m = traj_batch.get("chunck_mask")
+                    q = 0
+                    if m is not None:
+                        frac = float(m[i, -1].float().mean())
+                        q = min(3, int(frac * 4))
+                    lep.add_anchor(G[i], key=(fam, q))
         if not lep.ready:
             return None
         G = jacobian_rows(self, traj_batch, params, lep.subspace, lep.rank)

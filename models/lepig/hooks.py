@@ -43,12 +43,42 @@ def action_functional(module, batch, horizons=(1, 2, 4, 8)) -> torch.Tensor:
     One solve, every horizon read from it -- as the plan specifies.
     """
     pred = module._predict_waypoints(batch)          # [B, K, D]
+    # Standardize each action dimension with TRAINING-SET-ONLY mean/std before
+    # building the Fisher, then normalize each prefix by its dimensionality so
+    # long horizons do not dominate merely by containing more coordinates:
+    #   g_{i,H} = 1/sqrt(H d_a) * P_H((A_hat - mu_A) / (sigma_A + 1e-6))
+    mu, sd = _action_stats(module, pred)
+    z = (pred - mu) / (sd + 1e-6)
     outs = []
     for H in horizons:
-        h = min(int(H), pred.shape[1])
-        outs.append(pred[:, :h].reshape(pred.shape[0], -1)
-                    / (h * pred.shape[-1]) ** 0.5)
+        h = min(int(H), z.shape[1])
+        outs.append(z[:, :h].reshape(z.shape[0], -1)
+                    / (h * z.shape[-1]) ** 0.5)
     return torch.cat(outs, dim=1)                    # [B, sum(H*D)]
+
+
+def _action_stats(module, pred):
+    """Training-set action mean/std, cached on the module.
+
+    Falls back to the dataset's waypoint scale factors, which are exactly the
+    training-set normalisation this repo already computed -- not batch
+    statistics, which would leak across candidates and make the score
+    batch-dependent.
+    """
+    st = getattr(module, "_lepig_action_stats", None)
+    if st is not None:
+        return st
+    mu = torch.zeros(pred.shape[-1], device=pred.device, dtype=pred.dtype)
+    sd = torch.ones(pred.shape[-1], device=pred.device, dtype=pred.dtype)
+    scale = getattr(module, "_wp_scale", None)
+    if scale is not None:
+        try:
+            sd = torch.as_tensor(scale, device=pred.device, dtype=pred.dtype)
+            sd = sd.reshape(-1)[: pred.shape[-1]]
+        except Exception:
+            pass
+    module._lepig_action_stats = (mu, sd)
+    return mu, sd
 
 
 def jacobian_rows(module, batch, params, subspace, n_dir: int,

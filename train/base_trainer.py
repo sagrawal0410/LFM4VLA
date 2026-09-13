@@ -88,8 +88,29 @@ class BaseTrainer(pl.LightningModule):
         self.lepig = LepigController(cfg)
         self.world_branch = None
         self.vjepa = None
+        self.world_whiten = None
         if not self.lepig.enabled:
             return
+        # LoRA on the last 4 VLM blocks. Required by A2 and by the B/C world
+        # posterior: without it the posterior cannot express uncertainty in the
+        # representation-producing network, only in the head or adapter it is
+        # confined to. Injected for every plan that names it, and left absent
+        # for a1/a3 whose posteriors are defined without it.
+        lcfg = cfg.get("lora")
+        if lcfg:
+            from models.lepig.lora import inject_lora, lora_parameters
+            n = inject_lora(
+                self.model,
+                last_n=int(lcfg.get("last_n_vlm_blocks", 4)),
+                rank=int(lcfg.get("rank", 32)),
+                alpha=int(lcfg.get("alpha", 64)),
+                dropout=float(lcfg.get("dropout", 0.0)),
+                attention_targets=lcfg.get(
+                    "attention_targets", ["q_proj", "k_proj", "v_proj", "o_proj"]),
+                mlp_targets=lcfg.get(
+                    "mlp_targets", ["gate_proj", "up_proj", "down_proj"]))
+            npar = sum(q.numel() for q in lora_parameters(self.model))
+            print(f"[lepig] LoRA: {n} sites, {npar/1e6:.1f}M params", flush=True)
         if self.lepig.weights_the_world_loss or cfg.get("world_loss", False):
             from models.lepig.world import WorldBranch
             wcfg = cfg.get("world_branch", {}) or {}
@@ -105,6 +126,10 @@ class BaseTrainer(pl.LightningModule):
                    if k not in ("horizons_seconds", "horizons_steps",
                                 "target_pool_tokens")})
             self.lambda_world = float(cfg.get("lambda_world", 1.0))
+            from models.lepig.world import FrozenWhitening
+            self.world_whiten = FrozenWhitening(
+                int(cfg.get("target_dim", 1024)),
+                int(cfg.get("pig_projection_dim", 128)))
             # The target encoder: without this, world_branch has nothing to
             # regress toward and plans B/C cannot train at all.
             from models.lepig.vjepa import FrozenVJEPA2
