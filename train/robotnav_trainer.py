@@ -172,7 +172,37 @@ class RobotNavTrainer(BaseTrainer):
         self._lepig_last_w = w
         return w
 
+    def _add_world_loss(self, out, traj_batch, weights, mode):
+        """Attach the world loss to a forward result (plans B/C).
+
+        Both batch shapes route through here: "sample" mixing hands us a traj
+        sub-batch, "batch" mixing hands us a homogeneous traj batch. Putting
+        the call in only one of them is how the world branch ended up with zero
+        gradient while looking correctly built.
+        """
+        if mode != "train":
+            return out
+        wl = self._world_loss(traj_batch, weights=weights)
+        if wl is None:
+            return out
+        out = dict(out)
+        out["loss_world"] = wl
+        out["loss"] = (out["loss"] + self.lambda_world * wl
+                       if out.get("loss") is not None
+                       else self.lambda_world * wl)
+        return out
+
     def _forward_batch(self, batch: Dict[str, Any], mode: str = "train"):
+        # Homogeneous trajectory batch ("batch" mixing): the mixed branch below
+        # never sees these, so the world loss is attached here too.
+        if (isinstance(batch, dict)
+                and batch.get("data_source") == "robotnav_traj"
+                and getattr(self, "world_branch", None) is not None):
+            w = self._lepig_step(batch) if mode == "train" else None
+            if w is not None:
+                batch["lepig_w"] = w
+            out = dict(super()._forward_batch(batch, mode=mode))
+            return self._add_world_loss(out, batch, w, mode)
         multi = getattr(self.trainer, "world_size", 1) > 1
         if isinstance(batch, dict) and batch.get("data_source") == "robotnav_vl":
             out = dict(self._forward_vl_batch(batch))
@@ -196,12 +226,7 @@ class RobotNavTrainer(BaseTrainer):
                 if w is not None:
                     batch["traj"]["lepig_w"] = w
                 out = dict(super()._forward_batch(batch["traj"], mode=mode))
-                wl = self._world_loss(batch["traj"], weights=w) if mode == "train" else None
-                if wl is not None:
-                    out["loss_world"] = wl
-                    out["loss"] = (out["loss"] + self.lambda_world * wl
-                                   if out.get("loss") is not None
-                                   else self.lambda_world * wl)
+                out = self._add_world_loss(out, batch["traj"], w, mode)
             if batch.get("vl") is not None:
                 out["loss_vl_cotrain"] = self._forward_vl_batch(
                     batch["vl"])["loss_vl_cotrain"]
