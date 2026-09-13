@@ -325,11 +325,15 @@ class RobotNavMixtureDataset(IterableDataset):
             # future genuinely looks like now.
             last = max(hist) if hist else t
             fut_ids = [min(t + int(h), last) for h in self.world_horizons]
+            # Fixed 256x256: episodes are rendered at differing native sizes
+            # (401x640, 374x640, ...), so the collater cannot stack them raw,
+            # and V-JEPA2's encoder is a 256 model regardless. Resizing here
+            # also cuts ~3x off the per-sample tensor.
             pils = [Image.open(ep_dir / f"{fi:03d}_front.jpg").convert("RGB")
-                    for fi in fut_ids]
-            out_future = self.image_fn(pils)
-            if not torch.is_tensor(out_future):
-                out_future = torch.stack(out_future)
+                    .resize((256, 256), Image.BILINEAR) for fi in fut_ids]
+            out_future = torch.stack([
+                torch.from_numpy(np.asarray(im, dtype=np.uint8)).permute(2, 0, 1)
+                for im in pils])                          # [H, C, 256, 256]
 
         return {
             "sample_type": "traj",
