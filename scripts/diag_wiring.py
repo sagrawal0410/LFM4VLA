@@ -64,6 +64,7 @@ def routing_efficacy():
 def dataloader_future_frames():
     """Plans B/C need a frame at t+H. Confirm the loader emits one."""
     from train.experiment_utils import prepare_experiment
+    from train.robotnav_trainer import RobotNavTrainer
     from data.build_dataset import build_dataset
     cfg = json.load(open("configs/mn256x16-lfm2vl_3b-smolvla-navreason-holds-lepigb.json"))
     cfg["train_dataset"]["mixture_mode"] = "batch"
@@ -71,7 +72,9 @@ def dataloader_future_frames():
     cfg["train_dataset"]["world_horizons"] = [2, 4, 8]
     cfg["batch_size"] = 2
     cfg, *_ = prepare_experiment(cfg)
-    ds = build_dataset(cfg["train_dataset"], cfg, None)
+    # build_dataset needs the model for its image processor
+    module = RobotNavTrainer(cfg)
+    ds = build_dataset(cfg["train_dataset"], cfg, module.model)
     it = iter(ds); buf = []
     while len(buf) < 2:
         s = next(it)
