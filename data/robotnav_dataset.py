@@ -119,6 +119,11 @@ class RobotNavMixtureDataset(IterableDataset):
         # Supervise the repeated tail of truncated chunks ("arrive, then hold")
         # instead of masking it away -- the only stop signal the corpus carries.
         self.supervise_terminal_holds = bool(supervise_terminal_holds)
+        # World-model target horizons, in ACTION STEPS. Empty = no future frames
+        # loaded, which is the default and costs nothing for plans that do not
+        # use them. K=8 waypoints at 0.25 m span ~2 m, so 2/4/8 steps sit inside
+        # the action chunk the model is already predicting.
+        self.world_horizons = list(_ignored.get("world_horizons", []) or [])
         # Qwen-RobotNav per-sample observation randomization, single-view
         # variant (camera-view + per-camera-weight axes intentionally absent).
         # Axes: total visual token budget B ~ U[budget_min, budget_max];
@@ -310,8 +315,25 @@ class RobotNavMixtureDataset(IterableDataset):
         fid = [int(x) for x in frame_ids]
         d_cur = [float(t - f) for f in fid]
         d_next = [float(fid[i + 1] - fid[i]) for i in range(len(fid) - 1)] + [0.0]
+        out_future = None
+        if self.world_horizons:
+            # World-model targets: the frame the agent actually reaches H action
+            # steps later. Horizons are ACTION STEPS, not seconds -- this dataset
+            # is frame-indexed by step and records no frame rate, so a "0.5s"
+            # horizon would be an invented number. Beyond the last frame we clamp
+            # to it, which is also semantically right: at a terminal hold the
+            # future genuinely looks like now.
+            last = max(hist) if hist else t
+            fut_ids = [min(t + int(h), last) for h in self.world_horizons]
+            pils = [Image.open(ep_dir / f"{fi:03d}_front.jpg").convert("RGB")
+                    for fi in fut_ids]
+            out_future = self.image_fn(pils)
+            if not torch.is_tensor(out_future):
+                out_future = torch.stack(out_future)
+
         return {
             "sample_type": "traj",
+            "future_rgb": out_future,                     # [H, C, H, W] or None
             "frame_offsets": torch.tensor([d_cur, d_next], dtype=torch.float32).T,
             "rgb": rgb,                                   # [ws, C, H, W]
             "lang": self._instruction(family, row),
@@ -532,6 +554,8 @@ class RobotNavMixtureDataset(IterableDataset):
             "action_chunck": action_chunck,
             "chunck_mask": chunck_mask,
             "stop_label": stop_label,
+            "future_rgb": (torch.stack([s["future_rgb"] for s in samples])
+                           if samples[0].get("future_rgb") is not None else None),
             "raw_text": texts,
             "frame_offsets": torch.stack(
                 [s["frame_offsets"] for s in samples]),      # [B, ws, 2]

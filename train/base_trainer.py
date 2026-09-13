@@ -615,7 +615,6 @@ class BaseTrainer(pl.LightningModule):
                 action_mask=inputs["chunck_mask"],
                 stop_label=inputs.get("stop_label"),
                 lepig_w=inputs.get("lepig_w"),
-            lepig_w=inputs.get("lepig_w"),
                 vision_gripper=inputs["hand_rgb"],
                 raw_text=inputs["raw_text"],
                 rel_state=inputs["rel_state"],

@@ -110,6 +110,33 @@ class RobotNavTrainer(BaseTrainer):
                      fde_s.mean(0)[valid].mean(), **log)
 
     # ------------------------------------------------------------ LEPIG --
+    def _world_loss(self, traj_batch, weights=None):
+        """Plans B/C: predict the future V-JEPA2 latent, score against the real one.
+
+        Targets are frozen: the encoder is eval-mode, requires_grad=False, and
+        the target is stop-gradient, so this trains the bridge+predictor only
+        and can never collapse by moving the target.
+        """
+        wb = getattr(self, "world_branch", None)
+        if wb is None or traj_batch.get("future_rgb") is None:
+            return None
+        fut = traj_batch["future_rgb"].to(self.device)          # [B, H, C, h, w]
+        with torch.no_grad():
+            tgt = self.vjepa(fut)                                # [B, H, N, D] frozen
+        ctx = self._world_context(traj_batch)                    # backbone features
+        pred = self.world_branch(ctx)                            # [B, H, N, D]
+        loss = self.world_branch.loss(pred, tgt, weights=weights)
+        return loss
+
+    def _world_context(self, traj_batch):
+        """Backbone hidden states the world branch reads from."""
+        hs = getattr(self, "_last_action_hs", None)
+        if hs is None:
+            raise RuntimeError(
+                "world branch needs backbone features; _last_action_hs unset")
+        return hs
+
+
     def _lepig_step(self, traj_batch):
         """Per-step LEPIG lifecycle: snapshots, refresh, scoring, weights.
 
