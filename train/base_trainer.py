@@ -110,7 +110,7 @@ class BaseTrainer(pl.LightningModule):
             from models.lepig.vjepa import FrozenVJEPA2
             self.vjepa = FrozenVJEPA2(
                 cfg.get("target_encoder", "facebook/vjepa2-vitl-fpc64-256"),
-                pool_to=int((cfg.get("world_branch") or {}).get(
+                pool_tokens=int((cfg.get("world_branch") or {}).get(
                     "target_pool_tokens", 64)))
 
     @classmethod
