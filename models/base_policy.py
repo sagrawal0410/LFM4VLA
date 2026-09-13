@@ -131,6 +131,15 @@ class BasePolicyHead(torch.nn.Module):
             return None
         b, w = tok_seq.shape[:2]
         x = tok_seq.detach() if self.stop_detach else tok_seq
+        # Heads differ in whether they carry a token axis: the MLP head emits
+        # [B, ws, d] while the flow-matching heads emit [B, ws, n, d] with n in
+        # the hundreds. Flattening blindly makes the head's input dimension a
+        # function of the head type, so mean-pool the token axis instead and
+        # keep the stop head identical (and small) across every backbone.
+        if x.dim() == 4:
+            x = x.mean(dim=2)
+        elif x.dim() > 4:
+            x = x.reshape(b, w, -1, x.shape[-1]).mean(dim=2)
         return self.stop_head(x.reshape(b, w, -1))
 
     def stop_loss(self, stop_logits, stop_label):
