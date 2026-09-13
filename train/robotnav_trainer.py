@@ -142,6 +142,15 @@ class RobotNavTrainer(BaseTrainer):
         if hs is None:
             raise RuntimeError(
                 "world branch needs backbone features; _last_action_hs unset")
+        # The bridge cross-attends over a token sequence [B, N, D]. The backbone
+        # hands back [B, W, T, D] (window x per-step tokens), so flatten the
+        # window into the token axis rather than dropping it -- the world state
+        # depends on the whole observed history, not just the last step.
+        if hs.ndim == 4:
+            b, w, t, d = hs.shape
+            hs = hs.reshape(b, w * t, d)
+        elif hs.ndim == 2:
+            hs = hs.unsqueeze(1)
         return hs
 
 
