@@ -98,10 +98,20 @@ class BaseTrainer(pl.LightningModule):
                 in_features=in_features,
                 action_dim=int(self.configs.get("act_head", {}).get("action_dim", 3)),
                 action_conditioned=bool(cfg.get("action_conditioned", False)),
-                n_horizons=len(wcfg.get("horizons_seconds", [0.5, 1.0, 2.0])),
+                n_horizons=len(wcfg.get("horizons_steps",
+                                        wcfg.get("horizons_seconds", [2, 4, 8]))),
                 target_dim=int(cfg.get("target_dim", 1024)),
-                **{k: v for k, v in wcfg.items() if k != "horizons_seconds"})
+                **{k: v for k, v in wcfg.items()
+                   if k not in ("horizons_seconds", "horizons_steps",
+                                "target_pool_tokens")})
             self.lambda_world = float(cfg.get("lambda_world", 1.0))
+            # The target encoder: without this, world_branch has nothing to
+            # regress toward and plans B/C cannot train at all.
+            from models.lepig.vjepa import FrozenVJEPA2
+            self.vjepa = FrozenVJEPA2(
+                cfg.get("target_encoder", "facebook/vjepa2-vitl-fpc64-256"),
+                pool_to=int((cfg.get("world_branch") or {}).get(
+                    "target_pool_tokens", 64)))
 
     @classmethod
     def from_checkpoint(cls, ckpt_path=None, ckpt_source="torch", configs=None):

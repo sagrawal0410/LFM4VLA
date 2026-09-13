@@ -815,6 +815,9 @@ class RoboLFM25VL(RoboVLMBackbone):
         # parameter gradient is deliberately left unweighted -- weighting the
         # whole FM loss would distort q(a|c) and skew the policy toward rare
         # modes, which the plan document explicitly prohibits.
+        # Expose backbone features for the world branch (plans B/C). Detached
+        # here would cut the bridge's gradient path, so it is the live tensor.
+        self._last_action_hs = action_hs
         _w = head_kwargs.pop("lepig_w", None)
         if _w is not None:
             from models.lepig.routing import grad_scale_identity

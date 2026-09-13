@@ -127,7 +127,12 @@
     },
     "nav_reasoning_root": "/home/teams/research/robotics/robotnav_data/manifests/nav_reasoning/samples",
     "force_both_kinds": false,
-    "supervise_terminal_holds": true
+    "supervise_terminal_holds": true,
+    "world_horizons": [
+      2,
+      4,
+      8
+    ]
   },
   "val_dataset": {
     "type": "RobotNavMixtureDataset",
@@ -206,12 +211,12 @@
       "predictor_heads": 12,
       "predictor_mlp_ratio": 4,
       "dropout": 0.0,
-      "horizons_seconds": [
-        0.5,
-        1.0,
-        2.0
-      ],
-      "target_pool_tokens": 64
+      "target_pool_tokens": 64,
+      "horizons_steps": [
+        2,
+        4,
+        8
+      ]
     },
     "backbone_hidden": 2048,
     "target_dim": 1024

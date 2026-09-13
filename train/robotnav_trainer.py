@@ -130,7 +130,7 @@ class RobotNavTrainer(BaseTrainer):
 
     def _world_context(self, traj_batch):
         """Backbone hidden states the world branch reads from."""
-        hs = getattr(self, "_last_action_hs", None)
+        hs = getattr(self.model, "_last_action_hs", None)
         if hs is None:
             raise RuntimeError(
                 "world branch needs backbone features; _last_action_hs unset")
@@ -196,6 +196,12 @@ class RobotNavTrainer(BaseTrainer):
                 if w is not None:
                     batch["traj"]["lepig_w"] = w
                 out = dict(super()._forward_batch(batch["traj"], mode=mode))
+                wl = self._world_loss(batch["traj"], weights=w) if mode == "train" else None
+                if wl is not None:
+                    out["loss_world"] = wl
+                    out["loss"] = (out["loss"] + self.lambda_world * wl
+                                   if out.get("loss") is not None
+                                   else self.lambda_world * wl)
             if batch.get("vl") is not None:
                 out["loss_vl_cotrain"] = self._forward_vl_batch(
                     batch["vl"])["loss_vl_cotrain"]

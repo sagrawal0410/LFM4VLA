@@ -87,6 +87,54 @@ def dataloader_future_frames():
     return "future_rgb %s  dtype=%s  OK" % (tuple(fut.shape), fut.dtype)
 
 
+def world_branch_gradient():
+    """Plans B/C: does world_branch actually receive gradient?
+
+    Zero here means the branch is decorative -- the exact failure that hid in
+    the stop head for 25 GPU-hours and in LEPIG for three runs.
+    """
+    import types
+    from train.experiment_utils import prepare_experiment
+    from train.robotnav_trainer import RobotNavTrainer
+    from data.build_dataset import build_dataset
+    cfg = json.load(open("configs/mn256x16-lfm2vl_3b-smolvla-navreason-holds-lepigb.json"))
+    cfg["train_dataset"]["mixture_mode"] = "batch"
+    cfg["train_dataset"]["mixture_trajectory"] = 1.0
+    cfg["batch_size"] = 2
+    cfg, *_ = prepare_experiment(cfg)
+    m = RobotNavTrainer(cfg); m.train(); m.float()
+    m._trainer = types.SimpleNamespace(
+        world_size=1, global_rank=0, local_rank=0, num_devices=1, global_step=0,
+        current_epoch=0, max_steps=10, estimated_stepping_batches=10,
+        barebones=False, loggers=[], log_dir=None, state=None,
+        sanity_checking=False)
+    m.log = lambda *a, **k: None; m.log_dict = lambda *a, **k: None
+    if m.world_branch is None:
+        return "world_branch NOT BUILT"
+    if getattr(m, "vjepa", None) is None:
+        return "vjepa NOT BUILT -- no targets"
+    ds = build_dataset(cfg["train_dataset"], cfg, m.model)
+    it = iter(ds); buf = []
+    while len(buf) < 2:
+        x = next(it)
+        if x.get("sample_type") == "traj":
+            buf.append(x)
+    b = ds.collater(buf)
+    if isinstance(b.get("traj"), dict):
+        b = b["traj"]
+    for prm in m.parameters():
+        prm.grad = None
+    res = m.training_step(b, 0)
+    loss = res["loss"] if isinstance(res, dict) else res
+    loss.backward()
+    g = [prm.grad for prm in m.world_branch.parameters() if prm.grad is not None]
+    gn = sum(float(x.norm()) ** 2 for x in g) ** 0.5 if g else 0.0
+    npar = sum(prm.numel() for prm in m.world_branch.parameters())
+    return "params=%.1fM grad_norm=%.4e loss=%.4f -> %s" % (
+        npar / 1e6, gn, float(loss.detach()),
+        "TRAINING" if gn > 0 else "DEAD (no gradient)")
+
+
 print("=" * 68)
 print("1. STOP HEAD")
 print("   weight delta :", stop_head_delta())
@@ -110,4 +158,10 @@ try:
     print("   ", dataloader_future_frames())
 except Exception as e:
     print("    FAILED:", type(e).__name__, str(e)[:150])
+
+print("\n5. WORLD BRANCH GRADIENT (plans B/C)")
+try:
+    print("   ", world_branch_gradient())
+except Exception as e:
+    print("    FAILED:", type(e).__name__, str(e)[:200])
 print("=" * 68)
