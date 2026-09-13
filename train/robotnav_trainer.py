@@ -122,11 +122,14 @@ class RobotNavTrainer(BaseTrainer):
             return None
         fut = traj_batch["future_rgb"].to(self.device)          # [B, H, C, h, w]
         with torch.no_grad():
-            # FrozenVJEPA2 exposes encode()/pool(), not __call__. Encoding per
-            # horizon keeps each target aligned to its own query.
+            # encode() takes a LIST OF CLIPS, each clip a list of frames, and
+            # pools internally. A future world-state is one frame, so each clip
+            # is a single-frame clip; passing a flat tensor instead makes the
+            # video processor read all B*H frames as one clip.
             b, h = fut.shape[0], fut.shape[1]
-            flat = fut.reshape(b * h, *fut.shape[2:])
-            tgt = self.vjepa.pool(self.vjepa.encode(flat))
+            flat = fut.reshape(b * h, *fut.shape[2:])            # [B*H, C, H, W]
+            clips = [[f.permute(1, 2, 0).cpu().numpy()] for f in flat]
+            tgt = self.vjepa.encode(clips)                       # [B*H, N, D]
             tgt = tgt.reshape(b, h, *tgt.shape[1:])              # [B, H, N, D]
         ctx = self._world_context(traj_batch)                    # backbone features
         pred = self.world_branch(ctx)                            # [B, H, N, D]
