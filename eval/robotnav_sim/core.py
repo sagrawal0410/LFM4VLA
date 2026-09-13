@@ -248,7 +248,7 @@ class WaypointController:
                  stop_radius: float = 0.50, min_steps_before_stop: int = 7,
                  stop_mode: str = "geometric", static_tol_xy: float = 0.06,
                  static_tol_yaw: float = 0.10, static_slots: int = 3,
-                 stop_debounce: int = 1):
+                 stop_debounce: int = 1, stop_head_thresh: float = 0.5):
         self.turn_rad = math.radians(turn_deg)
         self.lookahead = lookahead_m
         self.stop_radius = stop_radius
@@ -269,11 +269,26 @@ class WaypointController:
         # the model emits transient holds mid-route. A momentary hold should
         # not end an episode; a genuine arrival persists.
         self.stop_debounce = max(1, int(stop_debounce))
+        self.stop_head_thresh = float(stop_head_thresh)
         self._stop_votes = 0
 
-    def _wants_stop(self, w, trans: float, yaw8: float) -> bool:
+    def _wants_stop(self, w, trans: float, yaw8: float,
+                    stop_logits=None) -> bool:
         """Does this plan request a stop, before debouncing?"""
         geo = trans < self.stop_radius and abs(yaw8) < math.radians(12.0)
+        if self.stop_mode == "stop_head":
+            # The learned readout decides alone. Threshold is a free parameter:
+            # the head trains with pos_weight=8.0, so its logits are NOT
+            # calibrated probabilities and 0.5 would over-trigger badly.
+            if stop_logits is None:
+                return geo                      # head unavailable -> fall back
+            p = 1.0 / (1.0 + math.exp(-float(np.max(stop_logits))))
+            return p >= self.stop_head_thresh
+        if self.stop_mode == "head_and_geo":
+            if stop_logits is None:
+                return geo
+            p = 1.0 / (1.0 + math.exp(-float(np.max(stop_logits))))
+            return p >= self.stop_head_thresh and geo
         if self.stop_mode == "plan_static":
             return self._plan_is_static(w)
         if self.stop_mode == "both":
@@ -301,7 +316,7 @@ class WaypointController:
                     and (dyaw < self.static_tol_yaw).all())
 
     def act(self, waypoints: np.ndarray, fresh: bool = True,
-            step: int = 1 << 30) -> str:
+            step: int = 1 << 30, stop_logits=None) -> str:
         """fresh=False when following a cached plan mid-cycle.
 
         `step` is the episode step index; the stop test is suppressed for the
@@ -328,7 +343,7 @@ class WaypointController:
         # cannot occur in the first few steps from a valid start pose.
         want_stop = False
         if fresh and step >= self.min_steps_before_stop:
-            want_stop = self._wants_stop(w, trans, yaw8)
+            want_stop = self._wants_stop(w, trans, yaw8, stop_logits)
         if fresh:
             self._stop_votes = self._stop_votes + 1 if want_stop else 0
         if want_stop and self._stop_votes >= self.stop_debounce:
@@ -541,7 +556,8 @@ class PolicyClient:
     def predict(self, instruction: str, frames, family: str,
                 frame_ids=None) -> np.ndarray:
         payload = {"instruction": instruction, "family": family, "frames": [],
-                   "frame_ids": list(frame_ids) if frame_ids else None}
+                   "frame_ids": list(frame_ids) if frame_ids else None,
+                   "want_tokens": bool(getattr(self, "want_tokens", False))}
         for f in frames:
             buf = io.BytesIO()
             f.save(buf, format="JPEG", quality=92)
@@ -558,6 +574,8 @@ class PolicyClient:
                 break
         if "error" in resp:
             raise RuntimeError(resp["error"])
+        self.last_stop_logits = resp.get("stop_logits")
+        self.last_tokens = resp.get("tokens")
         return np.asarray(resp["waypoints"], dtype=np.float32)
 
     def close(self):

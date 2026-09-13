@@ -99,7 +99,14 @@ def main():
             w[:, 0] *= sf["x"]
             w[:, 1] *= sf["y"]
             w[:, 2] *= sf["yaw"]
-            proto.write(json.dumps({"waypoints": w.tolist()}) + "\n")
+            out = {"waypoints": w.tolist()}
+            lg = getattr(module, "_last_stop_logits", None)
+            if lg is not None:
+                out["stop_logits"] = lg[0].cpu().tolist()
+            tk = getattr(module, "_last_tokens", None)
+            if tk is not None and req.get("want_tokens"):
+                out["tokens"] = tk[0].cpu().tolist()
+            proto.write(json.dumps(out) + "\n")
             proto.flush()
         except Exception as e:  # noqa: BLE001
             proto.write(json.dumps({"error": repr(e)}) + "\n")

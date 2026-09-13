@@ -210,11 +210,13 @@ def rollout(sim, client, ep, args, recorder):
     rot = ep["start_rot"]
     q = np.quaternion(rot[3], rot[0], rot[1], rot[2])
     core.set_agent(sim, ep["start_pos"], q)
+    global _probe_X, _probe_y
     ctrl = core.WaypointController(turn_deg=ep["turn_deg"],
                                    stop_radius=args.stop_radius,
                                    stop_mode=args.stop_mode,
                                    min_steps_before_stop=args.min_steps_before_stop,
-                                   stop_debounce=args.stop_debounce)
+                                   stop_debounce=args.stop_debounce,
+                                   stop_head_thresh=args.stop_head_thresh)
     goals = ep.get("goals") or [ep["goal"]]
     start_geo = core.geodesic_min(sim, ep["start_pos"], goals)
     ref = ep.get("ref_path")
@@ -251,9 +253,15 @@ def rollout(sim, client, ep, args, recorder):
             dt = time.time() - t0
             plan_used = 0
         wps = plan
-        action = ctrl.act(wps, fresh=(plan_used == 0), step=step)
+        action = ctrl.act(wps, fresh=(plan_used == 0), step=step,
+                          stop_logits=getattr(client, "last_stop_logits", None))
         st = sim.get_agent(0).get_state()
         d_goal = core.geodesic_min(sim, st.position, goals)
+        if args.probe_dump is not None:
+            tk = getattr(client, "last_tokens", None)
+            if tk is not None:
+                _probe_X.append(np.asarray(tk, dtype=np.float32))
+                _probe_y.append(float(d_goal))
         near_goal = core.nearest_goal(sim, st.position, goals)
         # goal in the robot's ego frame (habitat local: fwd=-z, left=-x)
         gl = quaternion.rotate_vectors(
@@ -283,6 +291,10 @@ def rollout(sim, client, ep, args, recorder):
     m.update({"episode": ep["id"], "scene": ep["scene"], "steps": len(positions),
               "stopped": action == "stop"})
     return m
+
+
+_probe_X = []
+_probe_y = []
 
 
 def main():
@@ -318,11 +330,20 @@ def main():
                          "(RxR needs ~450; R2R fits in 130)")
     ap.add_argument("--max-steps", type=int, default=150)
     ap.add_argument("--out", default="results/rollouts")
+    # accumulators for --probe-dump (module-level so run_episode can append)
+    ap.add_argument("--stop-head-thresh", type=float, default=0.5,
+                    help="probability threshold for --stop-mode stop_head; the "
+                         "head trains with pos_weight=8.0 so its logits are not "
+                         "calibrated and this must be swept, not assumed")
+    ap.add_argument("--probe-dump", default=None,
+                    help="write (pooled action tokens, true geodesic distance) "
+                         "per step to this .npz for the arrival-probe test")
     ap.add_argument("--stop-debounce", type=int, default=1,
                     help="honour a stop only after this many consecutive fresh "
                          "plans request it; 1 = current behaviour")
     ap.add_argument("--stop-mode", default="geometric",
-                    choices=["geometric", "plan_static", "both"],
+                    choices=["geometric", "plan_static", "both",
+                             "stop_head", "head_and_geo"],
                     help="geometric: controller decides from the last waypoint's "
                          "distance. plan_static: the MODEL decides -- stop when "
                          "it emits a plan that stops changing, which is what "
@@ -365,6 +386,8 @@ def main():
     print(f"[suite] {args.suite}/{args.split}: {len(eps)} episodes")
 
     client = core.PolicyClient(args.config, args.ckpt, device=args.policy_device)
+
+    client.want_tokens = args.probe_dump is not None
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     results = []
@@ -411,7 +434,12 @@ def main():
                     "episodes": len(results), "ckpt": args.ckpt})
         (out / "metrics.json").write_text(json.dumps(
             {"aggregate": agg, "episodes": results}, indent=2))
-        print("[aggregate]", json.dumps(agg))
+    if args.probe_dump and _probe_X:
+        np.savez_compressed(args.probe_dump,
+                            X=np.stack(_probe_X), y=np.asarray(_probe_y))
+        print(f"[probe] wrote {len(_probe_X)} pairs to {args.probe_dump}",
+              flush=True)
+    print("[aggregate]", json.dumps(agg))
 
 
 if __name__ == "__main__":

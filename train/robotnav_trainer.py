@@ -69,6 +69,20 @@ class RobotNavTrainer(BaseTrainer):
             pred = pred.get("action", pred.get("actions"))
         if isinstance(pred, (tuple, list)):
             pred = pred[0]
+        # Side-channel for eval probes: the backbone features the action head
+        # read, and the stop head's readout of them. Stashed rather than
+        # returned so every existing caller keeps its [B, K, 3] contract.
+        hs = getattr(self.model, "_last_action_hs", None)
+        if hs is not None:
+            h = hs[:, -1] if hs.dim() >= 3 else hs
+            if h.dim() == 3:
+                h = h.mean(dim=1)                        # pool tokens -> [B, D]
+            self._last_tokens = h.detach().float()
+            head = getattr(self.model, "act_head", None)
+            if head is not None and getattr(head, "use_stop_head", False):
+                lg = head.stop_logits_from(hs)
+                if lg is not None:
+                    self._last_stop_logits = lg[:, -1].detach().float()
         return pred[:, -1].float()                       # [B, K, 3]
 
     @torch.no_grad()
