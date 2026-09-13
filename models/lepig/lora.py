@@ -89,7 +89,8 @@ def _find_blocks(model, prefer_language: bool = True) -> List[nn.Module]:
 def inject_lora(model, last_n: int = 4, rank: int = 32, alpha: int = 64,
                 dropout: float = 0.0,
                 attention_targets: Sequence[str] = DEFAULT_ATTN,
-                mlp_targets: Sequence[str] = DEFAULT_MLP) -> int:
+                mlp_targets: Sequence[str] = DEFAULT_MLP,
+                conv_targets: Sequence[str] = ("in_proj", "out_proj")) -> int:
     """Wrap the target Linears in the last `last_n` blocks. Returns sites wrapped."""
     blocks = _find_blocks(model)
     if not blocks:
@@ -98,7 +99,10 @@ def inject_lora(model, last_n: int = 4, rank: int = 32, alpha: int = 64,
                      if isinstance(sub, nn.Linear)})
     print(f"[lepig] LoRA stack: {len(blocks)} blocks, leaf linears={leaves}",
           flush=True)
-    targets = tuple(attention_targets) + tuple(mlp_targets)
+    # Hybrid stacks mix attention and short-conv blocks; adapt the linear maps
+    # of whichever kind each block actually is.
+    targets = (tuple(attention_targets) + tuple(mlp_targets)
+               + tuple(conv_targets or ()))
     wrapped = 0
     for blk in blocks[-int(last_n):]:
         for name, mod in list(blk.named_modules()):

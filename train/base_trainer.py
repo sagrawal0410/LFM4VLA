@@ -107,8 +107,8 @@ class BaseTrainer(pl.LightningModule):
                 dropout=float(lcfg.get("dropout", 0.0)),
                 attention_targets=lcfg.get(
                     "attention_targets", ["q_proj", "k_proj", "v_proj", "o_proj"]),
-                mlp_targets=lcfg.get(
-                    "mlp_targets", ["gate_proj", "up_proj", "down_proj"]))
+                mlp_targets=lcfg.get("mlp_targets", ["w1", "w3", "w2"]),
+                conv_targets=lcfg.get("conv_targets", ["in_proj", "out_proj"]))
             npar = sum(q.numel() for q in lora_parameters(self.model))
             print(f"[lepig] LoRA: {n} sites, {npar/1e6:.1f}M params", flush=True)
         if self.lepig.weights_the_world_loss or cfg.get("world_loss", False):

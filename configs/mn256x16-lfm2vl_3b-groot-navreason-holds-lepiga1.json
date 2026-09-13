@@ -238,7 +238,12 @@
         "gate_proj": "w1",
         "up_proj": "w3",
         "down_proj": "w2"
-      }
+      },
+      "conv_targets": [
+        "in_proj",
+        "out_proj"
+      ],
+      "_deviation": "LFM2 hybrid stack: last 4 language blocks are 3 short_conv + 1 attention, so 22 sites not 28"
     },
     "lora_in_posterior": false
   }
