@@ -94,7 +94,10 @@ def per_sample_stats(module, samples, ds, lepig, params):
                  for p in params if p.grad is not None) ** 0.5
         for p in module.parameters():
             p.grad = None
+        sl = b.get("stop_label")
+        hold_frac = float(sl[:, -1].float().mean()) if sl is not None else 0.0
         rec = {"loss": float(loss.detach()), "grad_norm": gn,
+               "hold_frac": hold_frac,
                "pig": 0.0, "raw_epi": 0.0, "param_ig": 0.0}
         # --- posterior-based scores ---------------------------------------
         if lepig is not None and lepig.ready:
@@ -126,6 +129,9 @@ def main():
     ap.add_argument("--heldout", type=int, default=16)
     ap.add_argument("--trials", type=int, default=5)
     ap.add_argument("--lr", type=float, default=2e-5)
+    ap.add_argument("--snapshots", type=int, default=13, help="spec: 13")
+    ap.add_argument("--rank", type=int, default=12, help="spec: 12")
+    ap.add_argument("--anchors", type=int, default=64, help="spec: 64")
     args = ap.parse_args()
 
     cfg = json.load(open(args.config))
@@ -137,8 +143,12 @@ def main():
         cfg["lepig"]["min_warmup_steps"] = 0
         cfg["lepig"]["warmup_fraction"] = 0.0
         cfg["lepig"]["refresh_steps"] = 1
-        cfg["lepig"]["trajectory_snapshots"] = 3
-        cfg["lepig"]["trajectory_window_steps"] = 3
+        # Keep the SPEC posterior: 13 snapshots -> rank 12. A fast rank-3
+        # approximation would weaken every PIG estimate and make a negative
+        # result uninterpretable.
+        cfg["lepig"]["trajectory_snapshots"] = int(args.snapshots)
+        cfg["lepig"]["trajectory_window_steps"] = int(args.snapshots)
+        cfg["lepig"]["posterior_rank"] = int(args.rank)
 
     from train.experiment_utils import prepare_experiment
     from train.robotnav_trainer import RobotNavTrainer
@@ -167,21 +177,43 @@ def main():
     # prime the posterior: snapshots + curvature + anchors, from data that is
     # neither the candidate pool nor the held-out set
     if lepig is not None and lepig.enabled:
-        prime = take(8)
-        for step in range(4):
+        prime = take(max(8, args.snapshots))
+        # Snapshots must differ or the PCA subspace is degenerate. Take a real
+        # (tiny) optimizer step between captures so the trajectory has extent,
+        # then restore the original weights so scoring happens at the
+        # checkpoint, not at a perturbed point.
+        w0 = copy.deepcopy(base.state_dict())
+        opt0 = torch.optim.AdamW(
+            [p for p in base.parameters() if p.requires_grad], lr=args.lr)
+        for step in range(args.snapshots):
             lepig.on_step(step, params)
             lepig.warm(step, 10)
+            b = ds.collater([prime[step % len(prime)]])
+            opt0.zero_grad()
+            pr = base._predict_waypoints(b)
+            gt = b["action_chunck"][:, -1].to(pr.device).float()
+            mk = b["chunck_mask"][:, -1].to(pr.device).float()
+            (((pr - gt) ** 2).sum(-1).sqrt() * mk).sum().div(
+                mk.sum().clamp(min=1)).backward()
+            opt0.step()
+        base.load_state_dict(w0)
+        del w0, opt0
         if lepig.should_refresh(0):
             lepig.refresh()
-        for s in prime:
+        anchor_pool = take(args.anchors)
+        for s in anchor_pool:
             G = jacobian_rows(base, ds.collater([s]), params, lepig.subspace, lepig.rank)
             if G is not None:
                 lepig.add_calibration(G[0]); lepig.add_anchor(G[0])
         print(f"  posterior primed: rank={lepig.subspace.effective_rank} "
               f"anchors={len(lepig.anchors)} ready={lepig.ready}", flush=True)
 
-    METHODS = ["pig", "pig_bottom", "loss", "grad_norm", "raw_epi",
-               "param_ig", "random"]
+    # The loss family is the cheap baseline every reviewer reaches for, so it
+    # gets three variants, not one: plain high-loss, high-loss restricted to
+    # terminal-hold samples (the signal we know matters here), and
+    # loss x grad_norm which is the common "hard AND influential" heuristic.
+    METHODS = ["pig", "pig_bottom", "loss", "loss_hold", "loss_x_grad",
+               "grad_norm", "raw_epi", "param_ig", "random"]
     gains = {m: [] for m in METHODS}
 
     for trial in range(args.trials):
@@ -192,6 +224,10 @@ def main():
             "pig":       np.argsort([-s["pig"] for s in stats]),
             "pig_bottom": np.argsort([s["pig"] for s in stats]),
             "loss":      np.argsort([-s["loss"] for s in stats]),
+            "loss_hold":  np.argsort([-(s["loss"] * (1.0 + s["hold_frac"]))
+                                      for s in stats]),
+            "loss_x_grad": np.argsort([-(s["loss"] * s["grad_norm"])
+                                       for s in stats]),
             "grad_norm": np.argsort([-s["grad_norm"] for s in stats]),
             "raw_epi":   np.argsort([-s["raw_epi"] for s in stats]),
             "param_ig":  np.argsort([-s["param_ig"] for s in stats]),
@@ -231,6 +267,12 @@ def main():
     lo_m, bot_m = np.mean(gains["loss"]), np.mean(gains["pig_bottom"])
     print(f"  PIG vs random      : {pig_m - rnd_m:+.5f}")
     print(f"  PIG vs loss        : {pig_m - lo_m:+.5f}")
+    for b_ in ("loss_hold", "loss_x_grad", "grad_norm"):
+        print(f"  PIG vs {b_:<12}: {pig_m - float(np.mean(gains[b_])):+.5f}")
+    beats_loss_family = all(
+        pig_m > float(np.mean(gains[b_]))
+        for b_ in ("loss", "loss_hold", "loss_x_grad"))
+    print(f"  beats ENTIRE loss family: {beats_loss_family}")
     print(f"  PIG top vs bottom  : {pig_m - bot_m:+.5f}  "
           f"(ordering is {'REAL' if pig_m > bot_m else 'NOT supported'})")
     if top == "pig" and pig_m > rnd_m and pig_m > bot_m:
