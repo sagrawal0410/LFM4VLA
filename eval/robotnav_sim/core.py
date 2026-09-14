@@ -270,6 +270,7 @@ class WaypointController:
         # not end an episode; a genuine arrival persists.
         self.stop_debounce = max(1, int(stop_debounce))
         self.stop_head_thresh = float(stop_head_thresh)
+        self.missing_logits = 0
         self._stop_votes = 0
 
     def _wants_stop(self, w, trans: float, yaw8: float,
@@ -281,12 +282,18 @@ class WaypointController:
             # the head trains with pos_weight=8.0, so its logits are NOT
             # calibrated probabilities and 0.5 would over-trigger badly.
             if stop_logits is None:
-                return geo                      # head unavailable -> fall back
+                # Do NOT fall back to geometry here. A silent fallback would
+                # report the geometric controller's behaviour as the head's,
+                # which is exactly the failure this experiment is meant to
+                # rule out. Missing logits must look like "never stops".
+                self.missing_logits += 1
+                return False
             p = 1.0 / (1.0 + math.exp(-float(np.max(stop_logits))))
             return p >= self.stop_head_thresh
         if self.stop_mode == "head_and_geo":
             if stop_logits is None:
-                return geo
+                self.missing_logits += 1
+                return False
             p = 1.0 / (1.0 + math.exp(-float(np.max(stop_logits))))
             return p >= self.stop_head_thresh and geo
         if self.stop_mode == "plan_static":
