@@ -157,7 +157,14 @@ def main():
 
     cfg, *_ = prepare_experiment(cfg)
     base = RobotNavTrainer.from_checkpoint(args.ckpt, "torch", cfg)
-    base.train(); base.float(); attach_stub_trainer(base)
+    base.train(); base.float()
+    # Allocating a GPU does nothing unless the module is moved onto it. Without
+    # this the run executes at CPU speed and wall-clocks out during priming.
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    base.to(dev)
+    print(f"  device: {dev}  ({torch.cuda.get_device_name(0) if dev=='cuda' else 'no GPU visible'})",
+          flush=True)
+    attach_stub_trainer(base)
     ds = build_dataset(cfg["train_dataset"], cfg, base.model)
 
     def take(n):
@@ -201,7 +208,13 @@ def main():
         if lepig.should_refresh(0):
             lepig.refresh()
         anchor_pool = take(args.anchors)
-        for s in anchor_pool:
+        print(f"  priming anchors ({args.anchors})...", flush=True)
+        import time as _t
+        _t0 = _t.time()
+        for _ai, s in enumerate(anchor_pool):
+            if _ai and _ai % 8 == 0:
+                print(f"    anchor {_ai}/{len(anchor_pool)}  "
+                      f"{(_t.time()-_t0)/_ai:.1f}s each", flush=True)
             G = jacobian_rows(base, ds.collater([s]), params, lepig.subspace, lepig.rank)
             if G is not None:
                 lepig.add_calibration(G[0]); lepig.add_anchor(G[0])
@@ -218,6 +231,7 @@ def main():
 
     for trial in range(args.trials):
         pool = take(args.pool)
+        print(f"  trial {trial}: scoring {len(pool)} candidates...", flush=True)
         stats = per_sample_stats(base, pool, ds, lepig, params)
         base_loss = heldout_loss(base, held)
         order = {
