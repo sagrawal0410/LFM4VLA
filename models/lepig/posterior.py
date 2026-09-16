@@ -51,8 +51,21 @@ class SubspacePosterior:
         eye = torch.eye(self.r, device=self.Lambda.device, dtype=self.dtype)
         self.Lambda = self.prior_precision * eye
 
+    def _align_to(self, ref):
+        """Move posterior state onto the device of an incoming Jacobian.
+
+        The controller builds this object before Lightning moves the module to
+        GPU, so Lambda starts on CPU while Jacobians arrive on cuda:N. Every
+        LEPIG training run crashed in pig() with "expected all tensors to be on
+        the same device" the instant scoring engaged. Aligning lazily on first
+        contact makes the posterior correct regardless of construction order.
+        """
+        if torch.is_tensor(ref) and self.Lambda.device != ref.device:
+            self.Lambda = self.Lambda.to(ref.device)
+
     def add_fisher(self, F: torch.Tensor):
         """Accumulate one calibration example's Fisher block [r, r]."""
+        self._align_to(F)
         self.Lambda = self.Lambda + F.to(self.Lambda)
 
     @staticmethod
@@ -75,6 +88,7 @@ class SubspacePosterior:
         G_cand:    [d_g, r]        candidate Jacobian
         G_anchors: list of [d_e, r] anchor Jacobians (cached per snapshot)
         """
+        self._align_to(G_cand)
         Sig = self.Sigma
         F_i = self.fisher_from_jac(G_cand, obs_var)
         # Sigma_{D+i} = (Lambda + F_i)^-1, still r x r
@@ -95,11 +109,13 @@ class SubspacePosterior:
     # -- diagnostics used by the falsification checklist -------------------
     def raw_epistemic(self, G: torch.Tensor) -> torch.Tensor:
         """tr(G Sigma G^T) -- the 'RawEpi' baseline score."""
+        self._align_to(G)
         Gm = G.to(self.Sigma)
         return torch.einsum("ij,jk,ik->", Gm, self.Sigma, Gm)
 
     def parameter_ig(self, G: torch.Tensor, obs_var: float = 1.0) -> torch.Tensor:
         """0.5 logdet(I + Sigma F_i) -- the 'ParameterIG' baseline score."""
+        self._align_to(G)
         F = self.fisher_from_jac(G, obs_var)
         eye = torch.eye(self.r, device=F.device, dtype=F.dtype)
         return 0.5 * _chol_logdet(eye + self.Sigma @ F, self.jitter_rel)
