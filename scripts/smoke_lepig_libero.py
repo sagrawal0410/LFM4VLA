@@ -47,7 +47,13 @@ def check(cfg_path):
     from models.lepig.hooks import selected_params, jacobian_rows
 
     cfg, *_ = prepare_experiment(cfg)
-    m = BaseTrainer(cfg); m.train(); m.float()
+    # Respect trainer_class exactly as train/experiment.py does. Hardcoding
+    # BaseTrainer here tested a path the real runs never take.
+    cls = BaseTrainer
+    if cfg.get("trainer_class") == "RobotNavTrainer":
+        from train.robotnav_trainer import RobotNavTrainer
+        cls = RobotNavTrainer
+    m = cls(cfg); m.train(); m.float()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     m.to(dev); stub(m)
 
