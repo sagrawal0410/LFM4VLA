@@ -560,7 +560,14 @@ class BaseTrainer(pl.LightningModule):
         action_chunck = batch.get("action_chunck")
         if action_chunck is not None:
             action_chunck = action_chunck.to(self.device)
-            if action_chunck.shape[-1] == 7:
+            # Flow-matching heads emit ONE action vector and carry no gripper
+            # channel ({"actions": pred, "gripper": None}), so splitting 7-DoF
+            # into arm(6)+gripper(1) hands them a 6-wide target while the head
+            # was built for 7. Setting action_dim=6 would "fix" the shape by
+            # silently discarding the gripper, which makes pick-and-place
+            # impossible. split_gripper=false keeps the full vector intact.
+            if (action_chunck.shape[-1] == 7
+                    and bool(self.configs.get("split_gripper", True))):
                 arm_action_chunck = action_chunck[..., :6]
                 # Collater binarizes gripper to {0, 1} (closed/open); do not remap again.
                 gripper_action_chunck = action_chunck[..., -1]
