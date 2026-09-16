@@ -124,39 +124,6 @@ class RobotNavTrainer(BaseTrainer):
                      fde_s.mean(0)[valid].mean(), **log)
 
     # ------------------------------------------------------------ LEPIG --
-    def _world_loss(self, traj_batch, weights=None):
-        """Plans B/C: predict the future V-JEPA2 latent, score against the real one.
-
-        Targets are frozen: the encoder is eval-mode, requires_grad=False, and
-        the target is stop-gradient, so this trains the bridge+predictor only
-        and can never collapse by moving the target.
-        """
-        wb = getattr(self, "world_branch", None)
-        if wb is None or traj_batch.get("future_rgb") is None:
-            return None
-        fut = traj_batch["future_rgb"].to(self.device)          # [B, H, C, h, w]
-        with torch.no_grad():
-            # encode() takes a LIST OF CLIPS, each clip a list of frames, and
-            # pools internally. A future world-state is one frame, so each clip
-            # is a single-frame clip; passing a flat tensor instead makes the
-            # video processor read all B*H frames as one clip.
-            b, h = fut.shape[0], fut.shape[1]
-            flat = fut.reshape(b * h, *fut.shape[2:])            # [B*H, C, H, W]
-            clips = [[f.permute(1, 2, 0).cpu().numpy()] for f in flat]
-            tgt = self.vjepa.encode(clips)                       # [B*H, N, D]
-            tgt = tgt.reshape(b, h, *tgt.shape[1:])              # [B, H, N, D]
-        ctx = self._world_context(traj_batch)                    # backbone features
-        pred = self.world_branch(ctx)                            # [B, H, N, D]
-        # Fit the frozen PCA-whitening ONCE, on training targets only. It is
-        # used for the PIG functional, never in the loss path -- a trainable
-        # projection there could collapse the space and make the score
-        # meaningless (spec step 9: R_W = I in the 128-D whitened space).
-        if self.world_whiten is not None and not self.world_whiten.fitted:
-            self.world_whiten.fit(tgt.reshape(-1, tgt.shape[-1]).float())
-        self._last_world_pred = pred
-        self._last_world_tgt = tgt
-        loss = self.world_branch.loss(pred, tgt, weights=weights)
-        return loss
 
     def world_functional(self):
         """The PIG functional for plans B/C: whitened predicted world latent."""
@@ -171,89 +138,7 @@ class RobotNavTrainer(BaseTrainer):
             flat = flat.reshape(pred.shape[0], -1)
         return flat / (flat.shape[-1] ** 0.5)
 
-    def _world_context(self, traj_batch):
-        """Backbone hidden states the world branch reads from."""
-        hs = getattr(self.model, "_last_action_hs", None)
-        if hs is None:
-            raise RuntimeError(
-                "world branch needs backbone features; _last_action_hs unset")
-        # The bridge cross-attends over a token sequence [B, N, D]. The backbone
-        # hands back [B, W, T, D] (window x per-step tokens), so flatten the
-        # window into the token axis rather than dropping it -- the world state
-        # depends on the whole observed history, not just the last step.
-        if hs.ndim == 4:
-            b, w, t, d = hs.shape
-            hs = hs.reshape(b, w * t, d)
-        elif hs.ndim == 2:
-            hs = hs.unsqueeze(1)
-        return hs
 
-
-    def _lepig_step(self, traj_batch):
-        """Per-step LEPIG lifecycle: snapshots, refresh, scoring, weights.
-
-        Returns detached per-example weights, or None when LEPIG is disabled or
-        still in warmup (in which case training is the uniform baseline, which
-        is exactly the control the plan document requires).
-        """
-        lep = getattr(self, "lepig", None)
-        if lep is None or not lep.enabled:
-            return None
-        from models.lepig.hooks import selected_params, jacobian_rows
-        step = int(self.global_step)
-        max_steps = int(self.configs["trainer"].get("max_steps", 80000))
-        params = selected_params(self.model, lep.plan)
-        lep.on_step(step, params)
-        lep.warm(step, max_steps)
-        if lep.should_refresh(step) and lep.refresh():
-            # curvature + anchors from THIS batch's geometry; both are rebuilt
-            # every refresh and never reused across snapshot versions.
-            G = jacobian_rows(self, traj_batch, params, lep.subspace,
-                              lep.rank)
-            if G is not None:
-                fams = traj_batch.get("family") or []
-                for i in range(G.shape[0]):
-                    lep.add_calibration(G[i])
-                    # Stratum for balancing: instruction family x progress
-                    # quartile. Scene id is not carried on the batch, so family
-                    # stands in for it -- families map to distinct suites and
-                    # therefore to disjoint scene sets.
-                    fam = fams[i] if i < len(fams) else "?"
-                    m = traj_batch.get("chunck_mask")
-                    q = 0
-                    if m is not None:
-                        frac = float(m[i, -1].float().mean())
-                        q = min(3, int(frac * 4))
-                    lep.add_anchor(G[i], key=(fam, q))
-        if not lep.ready:
-            return None
-        G = jacobian_rows(self, traj_batch, params, lep.subspace, lep.rank)
-        if G is None:
-            return None
-        scores = lep.score_batch([G[i] for i in range(G.shape[0])])
-        w = lep.weights(scores, G.shape[0], device=self.device)
-        self._lepig_last_w = w
-        return w
-
-    def _add_world_loss(self, out, traj_batch, weights, mode):
-        """Attach the world loss to a forward result (plans B/C).
-
-        Both batch shapes route through here: "sample" mixing hands us a traj
-        sub-batch, "batch" mixing hands us a homogeneous traj batch. Putting
-        the call in only one of them is how the world branch ended up with zero
-        gradient while looking correctly built.
-        """
-        if mode != "train":
-            return out
-        wl = self._world_loss(traj_batch, weights=weights)
-        if wl is None:
-            return out
-        out = dict(out)
-        out["loss_world"] = wl
-        out["loss"] = (out["loss"] + self.lambda_world * wl
-                       if out.get("loss") is not None
-                       else self.lambda_world * wl)
-        return out
 
     def _forward_batch(self, batch: Dict[str, Any], mode: str = "train"):
         # Homogeneous trajectory batch ("batch" mixing): the mixed branch below
@@ -262,6 +147,7 @@ class RobotNavTrainer(BaseTrainer):
                 and batch.get("data_source") == "robotnav_traj"
                 and getattr(self, "world_branch", None) is not None):
             w = self._lepig_step(batch) if mode == "train" else None
+            self._lepig_scored_this_batch = True
             if w is not None and self.lepig.routes_backbone_fm_grad:
                 batch["lepig_w"] = w
             out = dict(super()._forward_batch(batch, mode=mode))
@@ -286,6 +172,7 @@ class RobotNavTrainer(BaseTrainer):
             out: Dict[str, Any] = {"loss": None}
             if batch.get("traj") is not None:
                 w = self._lepig_step(batch["traj"]) if mode == "train" else None
+                self._lepig_scored_this_batch = True
                 # Plan B weights ONLY the world loss: its action supervision must
                 # stay uniform, so the FM gradient is not routed. Routing for B
                 # would make it identical to C, which is the single distinction
