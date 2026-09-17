@@ -10,6 +10,10 @@
 #SBATCH --requeue
 #SBATCH --output=output_robotnav_%j.out
 #SBATCH --error=output_robotnav_%j.err
+# The cluster now REQUIRES job attribution; submissions without a wckey
+# are rejected with "Invalid account or account/partition combination".
+#SBATCH --wckey=v1/model_development/ablation_and_research/general
+#SBATCH --comment=billable=n
 # Multi-node launcher (FSDP/DDP): geometry must match the config's
 # devices x num_nodes. Defaults 4x8; override at submit time, e.g. a smoke:
 #   CONFIG=... sbatch --nodes=2 --ntasks-per-node=2 --gpus-per-node=2 \
